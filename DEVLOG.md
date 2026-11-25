@@ -9,3 +9,7 @@ Set up the `.kiro` workspace before writing any code: seven steering files (prod
 ## 25 Nov 2026 12:04 | 00-database-foundation | 1.1 Create the spec branch and commit the spec documents
 
 Created the branch `spec/00-database-foundation` and rebuilt the three unpushed local `main` commits onto it as atomic commits, so `main` again matches GitHub. Added `tasks.meta.json` to `.gitignore` because it is Kiro tooling state. Committed the spec documents in `.kiro/specs/00-database-foundation/` and the prompt in `docs/kiro-prompts/00-database-foundation.md`.
+
+## 25 Nov 2026 12:08 | 00-database-foundation | 1.2 Verify the existing Supabase folder and link
+
+Confirmed that `supabase/config.toml` exists with `project_id = "pavio"`, that `supabase/.temp/project-ref` holds `tmglpalznmyonaynojyy`, and that `supabase/migrations/20261125040502_enable_pgtap.sql` is present. The Supabase MCP shows `enable_pgtap` as the only applied migration and `pgtap` 1.3.3 installed in the `extensions` schema, on the project at `tmglpalznmyonaynojyy.supabase.co`. Nothing was missing, so neither `supabase init` nor `supabase link` was run and no migration was reapplied.
