@@ -1,11 +1,11 @@
--- Business pages and their managers (Spec 00, Req 5.7, 6.7, 7.1 to 7.3, 7.9 to 7.13; DR-1).
--- This file holds the manager part (task 8.3). The business_details part is added by task 9,
--- after migration 6 creates that table.
+-- Business pages, their managers and their details (Spec 00, Req 5.7, 6.1 to 6.7, 7.1 to 7.3,
+-- 7.9 to 7.13, 25.1, 25.2, 25.4; DR-1).
+-- The manager part comes first (task 8.3); the business_details part follows (task 9).
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(68);
+select plan(154);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims (so the insert triggers keep owner_user_id as given
@@ -270,6 +270,257 @@ select is((select array_agg(user_id) from public.profile_managers where profile_
   array['55555555-5555-4555-8555-555555555555'::uuid], 'the remaining owner is Ned');
 select lives_ok($$ set constraints all immediate $$,
   'every business left in the transaction passes the deferred owner check');
+
+-- =============================================================================================
+-- Business details (task 9; Req 6.1 to 6.6, 25.1, 25.2, 25.4).
+-- State here: Mark owns olivia_cafe, Ned owns shared_shop, Olivia and Pat hold no business role.
+-- =============================================================================================
+set constraints all deferred;
+-- Ned also owns ned_garage, which has no details yet.
+insert into public.profiles (id, type, handle, display_name) values
+  ('6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b', 'business', 'ned_garage', 'Ned''s Garage');
+insert into public.profile_managers (profile_id, user_id, role) values
+  ('6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b', '55555555-5555-4555-8555-555555555555', 'owner');
+
+-- Catalog: table, uniqueness, index, triggers, RLS, policies and grants (Req 6.2, 22.1 to 22.5).
+select has_table('public', 'business_details', 'business_details exists');
+select col_is_unique('public', 'business_details', 'profile_id', 'business_details.profile_id is unique');
+select has_index('public', 'business_details', 'business_details_category_trgm_idx',
+  'business_details has the category trigram index');
+select trigger_is('public', 'business_details', 'business_details_guard', 'private', 'business_details_guard',
+  'business_details_guard trigger calls private.business_details_guard');
+select trigger_is('public', 'business_details', 'business_details_set_updated_at', 'private', 'set_updated_at',
+  'business_details updated_at trigger calls private.set_updated_at');
+select ok((select relrowsecurity from pg_class where oid = 'public.business_details'::regclass),
+  'RLS is enabled on business_details');
+select policies_are('public', 'business_details', array[
+  'business_details_anon_select', 'business_details_authenticated_select',
+  'business_details_authenticated_insert', 'business_details_authenticated_update',
+  'business_details_authenticated_delete'
+], 'business_details has exactly its five policies');
+select table_privs_are('public', 'business_details', 'anon', array['SELECT'],
+  'anon may only select business_details');
+select table_privs_are('public', 'business_details', 'authenticated', array['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  'authenticated may select, insert, update and delete business_details');
+
+-- Function privileges: the validator keeps execute for the API roles, the guard does not.
+select volatility_is('private', 'opening_hours_valid', array['jsonb'], 'immutable',
+  'opening_hours_valid is immutable');
+select ok(has_function_privilege(r, 'private.opening_hours_valid(jsonb)', 'execute'),
+  r || ' can execute private.opening_hours_valid(jsonb)')
+from unnest(array['anon', 'authenticated']) as r;
+select ok(not has_function_privilege('public', 'private.opening_hours_valid(jsonb)', 'execute'),
+  'public cannot execute private.opening_hours_valid(jsonb)');
+select ok(not has_function_privilege(r, 'private.business_details_guard()', 'execute'),
+  r || ' cannot execute private.business_details_guard()')
+from unnest(array['public', 'anon', 'authenticated']) as r;
+
+-- Opening hours validator (Req 6.4).
+select ok(private.opening_hours_valid('{}'), 'empty opening hours are valid');
+select ok(private.opening_hours_valid('{"mon": {"open": "08:00", "close": "17:30"}, "sun": null}'),
+  'a day with open and close times and a closed day are valid');
+select ok(private.opening_hours_valid(
+  '{"mon": {"open": "00:00", "close": "23:59"}, "tue": null, "wed": null, "thu": null,
+    "fri": null, "sat": null, "sun": null}'),
+  'all seven days with boundary times are valid');
+select ok(not private.opening_hours_valid('{"monday": {"open": "08:00", "close": "17:00"}}'),
+  'an unknown day key is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": "24:00", "close": "17:00"}}'),
+  'an hour of 24 is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": "8:00", "close": "17:00"}}'),
+  'a single digit hour is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": "08:60", "close": "17:00"}}'),
+  'a minute of 60 is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": "08:00"}}'),
+  'a day without a close time is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": "08:00", "close": "17:00", "note": "x"}}'),
+  'a day with an extra key is rejected');
+select ok(not private.opening_hours_valid('{"mon": {"open": 800, "close": 1700}}'),
+  'numeric times are rejected');
+select ok(not private.opening_hours_valid('{"mon": "closed"}'),
+  'a day whose value is a string is rejected');
+select ok(not private.opening_hours_valid('[]'), 'an array is rejected');
+select ok(not private.opening_hours_valid('"mon"'), 'a scalar is rejected');
+
+-- Checks and the guard bind every writer (Req 6.1 to 6.5, 25.4).
+select lives_ok($$ insert into public.business_details (profile_id, category, phone, website, opening_hours, address)
+                   values ('5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a', 'hardware', '+254 (20) 123-4567',
+                           'https://shared.example', '{"mon": {"open": "08:00", "close": "17:00"}, "sun": null}',
+                           'Moi Avenue, Nairobi') $$,
+  'details with every field can be stored for a business');
+select results_eq(
+  $$ select category, phone, website, opening_hours, address from public.business_details
+     where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  $$ values ('hardware', '+254 (20) 123-4567', 'https://shared.example',
+             '{"mon": {"open": "08:00", "close": "17:00"}, "sun": null}'::jsonb, 'Moi Avenue, Nairobi') $$,
+  'the stored details equal the input');
+select is((select opening_hours from public.business_details where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b'),
+  null::jsonb, 'ned_garage has no details row yet');
+select throws_ok($$ insert into public.business_details (profile_id) values ('5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a') $$,
+  '23505', null, 'a second details row for the same business is rejected');
+select throws_ok($$ insert into public.business_details (profile_id) values ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') $$,
+  'PT422', 'business.not_a_business', 'details for a person profile are rejected');
+select throws_ok($$ update public.business_details set profile_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'PT422', 'business.not_a_business', 'moving details onto a person profile is rejected');
+select throws_ok($$ update public.business_details set website = 'ftp://shared.example'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'a website starting with ftp:// is rejected');
+select throws_ok($$ update public.business_details set website = 'www.shared.example'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'a website without a scheme is rejected');
+select lives_ok($$ update public.business_details set website = 'http://shared.example'
+                   where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'a website starting with http:// is accepted');
+select throws_ok($$ update public.business_details set opening_hours = '{"mon": {"open": "25:00", "close": "17:00"}}'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'invalid opening hours are rejected by the check');
+select throws_ok($$ update public.business_details set opening_hours = '[]'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'opening hours that are not an object are rejected by the check');
+select throws_ok($$ update public.business_details set phone = 'call me'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'a phone with letters is rejected');
+select throws_ok($$ update public.business_details set phone = '12345'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'a phone shorter than 6 characters is rejected');
+select lives_ok($$ update public.business_details set address = repeat('a', 300)
+                   where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'a 300 character address is accepted');
+select throws_ok($$ update public.business_details set address = repeat('a', 301)
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'a 301 character address is rejected');
+select throws_ok($$ update public.business_details set category = repeat('a', 81)
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '23514', null, 'an 81 character category is rejected');
+update public.business_details set updated_at = '2000-01-01T00:00:00Z'
+where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a';
+select is((select updated_at from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a'),
+  now(), 'the trigger overwrites business_details.updated_at on update');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Mark, owner of olivia_cafe only: writes need acts_as on the business.
+-- ---------------------------------------------------------------------------------------------
+select set_config('request.jwt.claims',
+  json_build_object('sub', '22222222-2222-4222-8222-222222222222', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Mark claims (details)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '22222222-2222-4222-8222-222222222222'::uuid, 'auth.uid() is Mark');
+
+select lives_ok($$ insert into public.business_details (profile_id, category)
+                   values ((select id from public.profiles where handle = 'olivia_cafe'), 'cafe') $$,
+  'Mark can add details to the business he acts as');
+select lives_ok($$ update public.business_details set category = 'coffee shop'
+                   where profile_id = (select id from public.profiles where handle = 'olivia_cafe') $$,
+  'Mark can update the details of the business he acts as');
+select is((select category from public.business_details
+           where profile_id = (select id from public.profiles where handle = 'olivia_cafe')),
+  'coffee shop', 'Mark''s update was applied');
+select isnt_empty($$ select 1 from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'Mark can read the details of a business he does not act as');
+select throws_ok($$ insert into public.business_details (profile_id) values ('6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b') $$,
+  '42501', null, 'Mark cannot add details to a business he does not act as');
+select throws_ok($$ insert into public.business_details (profile_id) values ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb') $$,
+  'PT422', 'business.not_a_business', 'Mark cannot add details to his own person profile');
+select lives_ok($$ update public.business_details set category = 'taken over'
+                   where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'Mark''s update of another business''s details runs without error');
+select is((select category from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a'),
+  'hardware', 'Mark''s update of another business''s details changed nothing');
+select throws_ok($$ update public.business_details set profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b'
+                    where profile_id = (select id from public.profiles where handle = 'olivia_cafe') $$,
+  '42501', null, 'Mark cannot move his details onto a business he does not act as');
+select lives_ok($$ delete from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'Mark''s delete of another business''s details runs without error');
+select is((select count(*)::int from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a'),
+  1, 'the other business''s details still exist after Mark''s delete');
+select lives_ok($$ delete from public.business_details
+                   where profile_id = (select id from public.profiles where handle = 'olivia_cafe') $$,
+  'Mark can delete the details of the business he acts as');
+select is((select count(*)::int from public.business_details
+           where profile_id = (select id from public.profiles where handle = 'olivia_cafe')),
+  0, 'Mark''s delete removed the details');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Olivia, who no longer holds any business role: she can read but not write.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '11111111-1111-4111-8111-111111111111', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Olivia claims (details)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '11111111-1111-4111-8111-111111111111'::uuid, 'auth.uid() is Olivia');
+
+select throws_ok($$ insert into public.business_details (profile_id)
+                    values ((select id from public.profiles where handle = 'olivia_cafe')) $$,
+  '42501', null, 'a former owner cannot add details');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed out visitor: details are public (Req 6.6) and anon cannot write (Req 22.5).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+
+select results_eq(
+  $$ select category, phone, website, opening_hours, address from public.business_details
+     where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  $$ values ('hardware', '+254 (20) 123-4567', 'http://shared.example',
+             '{"mon": {"open": "08:00", "close": "17:00"}, "sun": null}'::jsonb, repeat('a', 300)) $$,
+  'anon can read every details field');
+select throws_ok($$ insert into public.business_details (profile_id) values ('6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b') $$,
+  '42501', null, 'anon cannot insert details');
+select throws_ok($$ update public.business_details set category = 'x'
+                    where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '42501', null, 'anon cannot update details');
+select throws_ok($$ delete from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  '42501', null, 'anon cannot delete details');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Ned, owner of shared_shop and ned_garage.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '55555555-5555-4555-8555-555555555555', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ned claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '55555555-5555-4555-8555-555555555555'::uuid, 'auth.uid() is Ned');
+
+select lives_ok($$ insert into public.business_details (profile_id, website)
+                   values ('6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b', 'https://garage.example') $$,
+  'Ned can add details to ned_garage');
+select is((select opening_hours from public.business_details where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b'),
+  '{}'::jsonb, 'opening hours default to an empty object');
+select throws_ok($$ insert into public.business_details (profile_id, website)
+                    values ('5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a', 'https://again.example') $$,
+  '23505', null, 'Ned cannot add a second details row to shared_shop');
+select throws_ok($$ update public.business_details set website = 'garage.example'
+                    where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b' $$,
+  '23514', null, 'the website check binds an API writer');
+select throws_ok($$ update public.business_details set opening_hours = '{"sat": {"open": "09:00"}}'
+                    where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b' $$,
+  '23514', null, 'the opening hours check binds an API writer');
+select lives_ok($$ update public.business_details set opening_hours = '{"sat": {"open": "09:00", "close": "13:00"}}'
+                   where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b' $$,
+  'Ned can set valid opening hours');
+select lives_ok($$ delete from public.business_details where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b' $$,
+  'Ned can delete the details of ned_garage');
+select is((select count(*)::int from public.business_details where profile_id = '6b6b6b6b-6b6b-4b6b-8b6b-6b6b6b6b6b6b'),
+  0, 'Ned''s delete removed the details');
+
+-- Deleting a business deletes its details (on delete cascade).
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+select lives_ok($$ delete from public.profiles where id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a' $$,
+  'shared_shop can be deleted');
+select is((select count(*)::int from public.business_details where profile_id = '5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a'),
+  0, 'the deleted business keeps no details row');
 
 select * from finish();
 rollback;
