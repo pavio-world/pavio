@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "privacy-audit",
+      "description": "Run on demand: asks the privacy-reviewer agent to audit all migrations, policies and server code against privacy.md.",
+      "trigger": "Manual",
+      "action": {
+        "type": "agent",
+        "prompt": "Delegate to the privacy-reviewer sub-agent: audit every file in supabase/migrations, supabase/tests, src/app/api and src/lib against .kiro/steering/privacy.md. Report findings ranked by severity with file and line, and list any privacy rule that has no test. Do not change code; produce the report only."
+      },
+      "enabled": true
+    }
+  ]
+}

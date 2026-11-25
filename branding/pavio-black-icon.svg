@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 200 220">
+  <defs>
+    <style>
+      .cls-1{fill:#000000}
+    </style>
+  </defs>
+  <title>pavio-black-icon</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <g id="pavio-black-icon">
+      <path d="M0 100 C0 44.772 44.772 0 100 0 C155.228 0 200 44.772 200 100 L200 150 L150 150 L150 100 C150 72.386 127.614 50 100 50 C72.386 50 50 72.386 50 100 L50 220 L0 220 Z" class="cls-1"/>
+      <circle cx="100" cy="124" r="25" class="cls-1"/>
+    </g>
+  </g>
+</svg>

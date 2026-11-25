@@ -1,0 +1,8 @@
+# Secrets and credentials: Kiro must never read these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+supabase/.temp/
+supabase/.branches/

@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "privacy-tests-on-migration",
+      "description": "Runs the pgTAP privacy tests whenever a migration or database test is saved, so a policy change can never silently open data.",
+      "trigger": "PostFileSave",
+      "matcher": "supabase/(migrations|tests)/.*\\.sql$",
+      "action": { "type": "command", "command": "bash scripts/hooks/run-db-tests.sh" },
+      "timeout": 300,
+      "enabled": true
+    }
+  ]
+}
