@@ -30,8 +30,32 @@ The commit history is part of the hackathon submission. Judges read it to see ho
   - `feat(view-as): add viewer switcher to profile header`
   - `fix(search): exclude non public bios from directory results`
 
+## One branch and one pull request per spec
+
+- **Every spec gets its own branch**, created from an up to date `main` before the first task: `spec/<spec folder name>`, for example `spec/00-database-foundation`, `spec/02-relationships-circles`.
+- All of that spec's commits (code, migrations, tests, DEVLOG entries) go on its branch. **Never commit directly to `main`.**
+- Push the branch after each completed task so progress is visible on GitHub.
+- **Open a pull request** into `main` when all the spec's tasks are done and its tests pass. Use GitHub through the available MCP tools or the `gh` CLI.
+- **Pull request title:** `Spec NN: <spec name>`. **Description**, using these headings:
+  - **Summary**: what the spec delivers, in plain language.
+  - **Spec**: link to `.kiro/specs/<spec>/` (requirements, design, tasks).
+  - **Tasks completed**: the task list with checkmarks.
+  - **Database changes**: migrations added, policies and functions created, advisor results.
+  - **Tests**: what was added and the result of every test suite.
+  - **Reviews**: the privacy-reviewer report for any spec that touches data, and the design-reviewer report with screenshots for any spec that touches UI.
+  - **Notes**: decisions, trade offs, anything left for later.
+- **Before opening the pull request**, run the relevant reviewer agents and fix every Critical and High finding.
+- **Merge** with a merge commit (not squash), so the atomic commit history stays readable on `main`. Then delete the branch and update local `main`.
+- **Only Dominic merges.** Prepare the pull request, then stop and ask him to review and merge.
+
+## One spec at a time (shared database)
+
+There is one hosted Supabase project, and migrations apply to it as soon as they run, even from a branch. So:
+
+- **Only one spec branch is open at a time.** Do not start the next spec until the previous pull request is merged into `main`.
+- If a spec is abandoned, its migrations are still live: write a new migration that reverses them (with Dominic's approval) rather than leaving the database ahead of `main`.
+
 ## Safety
 
 - Never commit secrets or `.env` files. Never rewrite pushed history: no force push, no rebase of pushed commits, no amending pushed commits.
-- Work on `main` in small commits. Push to `origin` after each completed spec task.
 - Never commit generated noise (build output, coverage, logs); `.gitignore` covers these.
