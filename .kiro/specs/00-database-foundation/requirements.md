@@ -272,7 +272,7 @@ Dominic's answers to both rounds of open questions (OQ and NQ) are recorded in *
 2. THE Database SHALL allow any number of Circles per Profile.
 3. THE Database SHALL allow at most one Circle with the same Circle_Private_Name, compared case insensitively, per Circle_Owner.
 4. WHEN a Circle is created without a Member_Label_Switch value, THE Database SHALL set the Member_Label_Switch to off.
-5. WHEN the Member_Label_Switch of a Circle is turned on and the Circle has no Member_Label, THE Database SHALL set the Member_Label to the current Circle_Private_Name.
+5. WHEN the Member_Label_Switch of a Circle is turned on and the Circle has no Member_Label, THE Database SHALL set the Member_Label to the current Circle_Private_Name. The pre-fill happens only when the switch turns on (off to on, or a Circle created with it on); a write that clears or blanks the Member_Label while the switch is already on is rejected with `PT422 circle.label_required`, never refilled.
 6. IF a write leaves a Circle with the Member_Label_Switch on and no Member_Label, THEN THE Database SHALL reject the write.
 7. WHEN the Circle_Owner changes the Circle_Private_Name, THE Database SHALL leave the Member_Label unchanged.
 8. WHEN the Member_Label_Switch of a Circle is turned off, THE Database SHALL keep the stored Member_Label so that the Circle_Owner can turn the switch on again with the same text.

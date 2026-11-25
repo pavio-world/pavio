@@ -545,8 +545,10 @@ if tg_op = 'UPDATE' then
   if old.is_all_followers and new.private_name <> old.private_name
     then raise PT422 'circle.all_followers_fixed';                                     -- 10.6
 end if;
-if new.show_member_label and new.member_label is null then
-  new.member_label := new.private_name;                                                -- 9.5
+if new.show_member_label and (new.member_label is null or btrim(new.member_label) = '') then
+  -- pre-fill only when the switch turns on (insert, or off to on); clearing an on label is rejected
+  if tg_op = 'INSERT' or not old.show_member_label then new.member_label := new.private_name; -- 9.5
+  else raise PT422 'circle.label_required';                                            -- 9.6
 end if;
 -- 9.7, 9.8: nothing else touches member_label; check constraint enforces 9.6
 
