@@ -8,7 +8,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(189);
+select plan(204);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims.
@@ -219,6 +219,12 @@ select is((select member_label from public.circles
 select lives_ok($$ update public.circles set member_label = 'Our regulars'
                    where owner_profile_id = '06b00000-0000-4000-8000-000000000011' and is_all_followers $$,
   'the all followers member label can be changed');
+select throws_ok($$ update public.circles set member_label = null
+                    where owner_profile_id = '06b00000-0000-4000-8000-000000000011' and is_all_followers $$,
+  'PT422', 'circle.label_required', 'the shown all followers label cannot be cleared');
+select is((select member_label from public.circles
+           where owner_profile_id = '06b00000-0000-4000-8000-000000000011' and is_all_followers),
+  'Our regulars', 'the all followers label is unchanged after the rejected clear');
 
 -- ---------------------------------------------------------------------------------------------
 -- Member label switch rules (Req 9.4 to 9.8) and private name rules (Req 9.1 to 9.3).
@@ -261,8 +267,63 @@ select is((select member_label from public.circles
            where owner_profile_id = '06b00000-0000-4000-8000-000000000001' and private_name = 'neighbours'),
   'neighbours', 'a circle created with the switch on and no label is pre-filled');
 
--- Req 9.6: the check is the last line of defence behind the pre-fill, so the pre-fill trigger is
--- switched off inside this rolled back transaction to reach it.
+-- The pre-fill happens only when the switch turns on. While the switch is on, clearing the label
+-- is rejected, so the private name is never copied into a label members already see.
+select throws_ok($$ update public.circles set member_label = null where id = '06c00000-0000-4000-8000-000000000001' $$,
+  'PT422', 'circle.label_required', 'clearing the label while the switch is on is rejected');
+select throws_ok($$ update public.circles set member_label = '   ' where id = '06c00000-0000-4000-8000-000000000001' $$,
+  'PT422', 'circle.label_required', 'blanking the label while the switch is on is rejected');
+select throws_ok($$ update public.circles set show_member_label = true, member_label = null
+                    where id = '06c00000-0000-4000-8000-000000000001' $$,
+  'PT422', 'circle.label_required', 'keeping the switch on while clearing the label is rejected, not pre-filled');
+select throws_ok($$ update public.circles set private_name = 'clan', member_label = null
+                    where id = '06c00000-0000-4000-8000-000000000001' $$,
+  'PT422', 'circle.label_required', 'renaming while clearing the shown label is rejected');
+select results_eq(
+  $$ select private_name, member_label from public.circles where id = '06c00000-0000-4000-8000-000000000001' $$,
+  $$ values ('kin'::text, 'family'::text) $$,
+  'the rejected writes left the name and the shown label as they were');
+
+insert into public.circles (owner_profile_id, private_name, member_label) values
+  ('06b00000-0000-4000-8000-000000000003', 'colleagues', 'Work people');
+update public.circles set show_member_label = true
+where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'colleagues';
+select is((select member_label from public.circles
+           where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'colleagues'),
+  'Work people', 'switching on with a label already set keeps that label');
+
+insert into public.circles (owner_profile_id, private_name) values
+  ('06b00000-0000-4000-8000-000000000003', 'cousins');
+update public.circles set show_member_label = true, member_label = '  '
+where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'cousins';
+select is((select member_label from public.circles
+           where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'cousins'),
+  'cousins', 'switching on with a blank label pre-fills it from the private name');
+insert into public.circles (owner_profile_id, private_name, show_member_label, member_label) values
+  ('06b00000-0000-4000-8000-000000000003', 'aunts', true, ' ');
+select is((select member_label from public.circles
+           where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'aunts'),
+  'aunts', 'a circle created with the switch on and a blank label is pre-filled');
+
+select lives_ok($$ update public.circles set show_member_label = false, member_label = null
+                   where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'cousins' $$,
+  'the label may be cleared while the switch is off');
+select lives_ok($$ update public.circles set private_name = 'second cousins'
+                   where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'cousins' $$,
+  'a circle with the switch off and no label can be renamed');
+select results_eq(
+  $$ select show_member_label, member_label from public.circles
+     where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'second cousins' $$,
+  $$ values (false, null::text) $$,
+  'renaming with the switch off copies nothing into the label');
+update public.circles set show_member_label = true
+where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'second cousins';
+select is((select member_label from public.circles
+           where owner_profile_id = '06b00000-0000-4000-8000-000000000003' and private_name = 'second cousins'),
+  'second cousins', 'only the off to on switch with no label copies the current private name');
+
+-- Req 9.6: the check is the last line of defence behind the pre-fill and the circle.label_required
+-- guard, so the trigger is switched off inside this rolled back transaction to reach it.
 alter table public.circles disable trigger circles_before_write;
 select throws_ok($$ update public.circles set show_member_label = true, member_label = null
                     where id = '06c00000-0000-4000-8000-000000000003' $$,
@@ -377,6 +438,9 @@ select lives_ok($$ update public.circles set private_name = 'old friends'
 select lives_ok($$ update public.circles set show_member_label = true
                    where id = '06c00000-0000-4000-8000-000000000003' $$,
   'Amy can turn on her circle''s label switch');
+select throws_ok($$ update public.circles set member_label = null
+                    where id = '06c00000-0000-4000-8000-000000000003' $$,
+  'PT422', 'circle.label_required', 'Amy cannot clear the label of a circle whose switch is on');
 select throws_ok($$ update public.circles set is_all_followers = true
                     where id = '06c00000-0000-4000-8000-000000000003' $$,
   '42501', null, 'is_all_followers cannot be written by the API on update');
