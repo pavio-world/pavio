@@ -1,12 +1,12 @@
 -- Relationships: the table, its guards, notification triggers and helpers (Spec 00, Req 8, 15.3 to
 -- 15.6, 25.1, 25.4; decision 003; DR-1).
--- The table part comes first (task 11). Task 12 adds a section for the relationship RPCs below,
--- with its own fixtures, and raises the plan count.
+-- The table part comes first (task 11); the relationship RPCs follow with their own fixtures
+-- (task 12).
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(148);
+select plan(268);
 
 -- =============================================================================================
 -- Relationships table (task 11; Req 8.1 to 8.3, 8.6 to 8.12, 8.16, 8.18, 8.20, 8.21, 15.3 to 15.6)
@@ -442,6 +442,396 @@ select lives_ok($$ delete from public.profiles where id = '05b00000-0000-4000-80
 select is((select count(*)::int from public.relationships
            where '05b00000-0000-4000-8000-000000000002' in (requester_profile_id, target_profile_id)),
   0, 'the deleted profile keeps no relationships');
+
+-- =============================================================================================
+-- Relationship RPCs (task 12; Req 8.4, 8.5, 8.13 to 8.19, 8.21, 8.23, 8.24, 22.4, 25.2, 25.3;
+-- decision 003). Every call runs as a simulated user, switched in the canary order (DR-1).
+-- Relationship ids returned by the RPCs are kept in transaction local settings (test.*).
+-- =============================================================================================
+
+-- ---------------------------------------------------------------------------------------------
+-- Fixtures, as the test owner with no claims.
+-- Fay, Gus, Hal, Ivy and Jo are people. Ivy owns ivy_bakery_rpc.
+-- ---------------------------------------------------------------------------------------------
+insert into auth.users (id, email) values
+  ('05060606-0000-4000-8000-000000000001', 'fay.rpc@example.invalid'),
+  ('05060606-0000-4000-8000-000000000002', 'gus.rpc@example.invalid'),
+  ('05060606-0000-4000-8000-000000000003', 'hal.rpc@example.invalid'),
+  ('05060606-0000-4000-8000-000000000004', 'ivy.rpc@example.invalid'),
+  ('05060606-0000-4000-8000-000000000005', 'jo.rpc@example.invalid');
+insert into public.profiles (id, type, owner_user_id, handle, display_name) values
+  ('05c00000-0000-4000-8000-000000000001', 'person', '05060606-0000-4000-8000-000000000001', 'fay_rpc', 'Fay'),
+  ('05c00000-0000-4000-8000-000000000002', 'person', '05060606-0000-4000-8000-000000000002', 'gus_rpc', 'Gus'),
+  ('05c00000-0000-4000-8000-000000000003', 'person', '05060606-0000-4000-8000-000000000003', 'hal_rpc', 'Hal'),
+  ('05c00000-0000-4000-8000-000000000004', 'person', '05060606-0000-4000-8000-000000000004', 'ivy_rpc', 'Ivy'),
+  ('05c00000-0000-4000-8000-000000000005', 'person', '05060606-0000-4000-8000-000000000005', 'jo_rpc', 'Jo');
+insert into public.profiles (id, type, handle, display_name) values
+  ('05c00000-0000-4000-8000-000000000011', 'business', 'ivy_bakery_rpc', 'Ivy''s Bakery');
+insert into public.profile_managers (profile_id, user_id, role) values
+  ('05c00000-0000-4000-8000-000000000011', '05060606-0000-4000-8000-000000000004', 'owner');
+
+-- ---------------------------------------------------------------------------------------------
+-- Catalog: definer, empty search_path, and execute grants exactly as the design's table (DR-4).
+-- ---------------------------------------------------------------------------------------------
+select ok((select prosecdef from pg_catalog.pg_proc where oid = f::regprocedure), f || ' is security definer')
+from unnest(array[
+  'public.request_relationship(uuid, uuid, public.relationship_type)',
+  'public.respond_to_connection(uuid, boolean)', 'public.remove_relationship(uuid)',
+  'public.my_relationships(uuid)', 'public.relationship_counts(uuid)'
+]) as f;
+select ok(exists (select 1 from pg_catalog.unnest((select proconfig from pg_catalog.pg_proc
+                    where oid = f::regprocedure)) c where c = 'search_path=""'),
+  f || ' sets an empty search_path')
+from unnest(array[
+  'public.request_relationship(uuid, uuid, public.relationship_type)',
+  'public.respond_to_connection(uuid, boolean)', 'public.remove_relationship(uuid)',
+  'public.my_relationships(uuid)', 'public.relationship_counts(uuid)'
+]) as f;
+select ok(has_function_privilege('authenticated', f, 'execute'), 'authenticated can execute ' || f)
+from unnest(array[
+  'public.request_relationship(uuid, uuid, public.relationship_type)',
+  'public.respond_to_connection(uuid, boolean)', 'public.remove_relationship(uuid)',
+  'public.my_relationships(uuid)', 'public.relationship_counts(uuid)'
+]) as f;
+select ok(not has_function_privilege('anon', f, 'execute'), 'anon cannot execute ' || f)
+from unnest(array[
+  'public.request_relationship(uuid, uuid, public.relationship_type)',
+  'public.respond_to_connection(uuid, boolean)', 'public.remove_relationship(uuid)',
+  'public.my_relationships(uuid)'
+]) as f;
+select ok(has_function_privilege('anon', 'public.relationship_counts(uuid)', 'execute'),
+  'anon can execute public.relationship_counts(uuid)');
+select ok(not has_function_privilege('public', f, 'execute'), 'public cannot execute ' || f)
+from unnest(array[
+  'public.request_relationship(uuid, uuid, public.relationship_type)',
+  'public.respond_to_connection(uuid, boolean)', 'public.remove_relationship(uuid)',
+  'public.my_relationships(uuid)', 'public.relationship_counts(uuid)'
+]) as f;
+select is(pg_catalog.pg_get_function_result('public.relationship_counts(uuid)'::regprocedure),
+  'TABLE(connections bigint, followers bigint)',
+  'relationship_counts returns two counts and no profile id, handle or name (Req 8.24)');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Fay: requests, duplicates, and a requester who cannot respond.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Fay claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Fay');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Fay');
+
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000002',
+                    '05c00000-0000-4000-8000-000000000003', 'connection') $$,
+  'PT403', 'acting.not_allowed', 'Fay cannot send a request as Gus');
+select ok(set_config('test.r_p1', public.request_relationship('05c00000-0000-4000-8000-000000000001',
+            '05c00000-0000-4000-8000-000000000002', 'connection')::text, true) is not null,
+  'Fay requests a connection to Gus');
+select ok(set_config('test.r_p3', public.request_relationship('05c00000-0000-4000-8000-000000000001',
+            '05c00000-0000-4000-8000-000000000003', 'connection')::text, true) is not null,
+  'Fay requests a connection to Hal');
+select ok(set_config('test.r_f1', public.request_relationship('05c00000-0000-4000-8000-000000000001',
+            '05c00000-0000-4000-8000-000000000011', 'follow')::text, true) is not null,
+  'Fay follows ivy_bakery_rpc');
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000001',
+                    '05c00000-0000-4000-8000-000000000002', 'connection') $$,
+  'PT409', 'relationship.exists', 'a repeated request through the RPC is rejected');
+select throws_ok($$ select public.respond_to_connection(current_setting('test.r_p1')::uuid, true) $$,
+  'PT404', 'relationship.not_found', 'the requester cannot accept her own request');
+select throws_ok($$ select public.respond_to_connection(current_setting('test.r_p1')::uuid, false) $$,
+  'PT404', 'relationship.not_found', 'the requester cannot decline her own request');
+select throws_ok($$ select * from public.my_relationships('05c00000-0000-4000-8000-000000000002') $$,
+  'PT403', 'acting.not_allowed', 'Fay cannot list Gus''s relationships (Req 8.23)');
+select throws_ok($$ select public.remove_relationship('05c00000-0000-4000-8000-0000000000ff') $$,
+  'PT404', 'relationship.not_found', 'removing a missing relationship is not found');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Gus: the target accepts (Req 8.4) and lists his relationships.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Gus claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Gus');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Gus');
+
+select lives_ok($$ select public.respond_to_connection(current_setting('test.r_p1')::uuid, true) $$,
+  'Gus, the target, accepts Fay''s request');
+select throws_ok($$ select public.respond_to_connection(current_setting('test.r_p1')::uuid, false) $$,
+  'PT422', 'relationship.bad_transition', 'an accepted connection cannot be answered again');
+select ok(set_config('test.r_p2', public.request_relationship('05c00000-0000-4000-8000-000000000002',
+            '05c00000-0000-4000-8000-000000000003', 'connection')::text, true) is not null,
+  'Gus requests a connection to Hal');
+select ok(set_config('test.r_f2', public.request_relationship('05c00000-0000-4000-8000-000000000002',
+            '05c00000-0000-4000-8000-000000000011', 'follow')::text, true) is not null,
+  'Gus follows ivy_bakery_rpc');
+select set_eq($$ select relationship_id, type::text, direction, status::text, other_profile_id,
+                        other_handle, other_display_name, other_type::text
+                 from public.my_relationships('05c00000-0000-4000-8000-000000000002') $$,
+  $$ values
+     (current_setting('test.r_p1')::uuid, 'connection', 'incoming', 'accepted',
+      '05c00000-0000-4000-8000-000000000001'::uuid, 'fay_rpc', 'Fay', 'person'),
+     (current_setting('test.r_p2')::uuid, 'connection', 'outgoing', 'pending',
+      '05c00000-0000-4000-8000-000000000003'::uuid, 'hal_rpc', 'Hal', 'person'),
+     (current_setting('test.r_f2')::uuid, 'follow', 'outgoing', 'accepted',
+      '05c00000-0000-4000-8000-000000000011'::uuid, 'ivy_bakery_rpc', 'Ivy''s Bakery', 'business') $$,
+  'my_relationships lists exactly Gus''s relationships with direction and the other profile');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Hal: the target declines (Req 8.5), accepts, reads counts, removes an accepted connection
+-- as its target (Req 8.13).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000003', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Hal claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Hal');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000003'::uuid, 'auth.uid() is Hal');
+
+select lives_ok($$ select public.respond_to_connection(current_setting('test.r_p3')::uuid, false) $$,
+  'Hal, the target, declines Fay''s request');
+select lives_ok($$ select public.respond_to_connection(current_setting('test.r_p2')::uuid, true) $$,
+  'Hal, the target, accepts Gus''s request');
+select results_eq($$ select direction, status::text from public.my_relationships('05c00000-0000-4000-8000-000000000003')
+                     where relationship_id = current_setting('test.r_p3')::uuid $$,
+  $$ values ('incoming', 'declined') $$,
+  'the target of a decline sees it as declined');
+select results_eq($$ select connections, followers from public.relationship_counts('05c00000-0000-4000-8000-000000000002') $$,
+  $$ values (2::bigint, 0::bigint) $$, 'Gus has two accepted connections and no followers');
+select results_eq($$ select connections, followers from public.relationship_counts('05c00000-0000-4000-8000-000000000011') $$,
+  $$ values (0::bigint, 2::bigint) $$, 'ivy_bakery_rpc has two followers');
+select results_eq($$ select connections, followers from public.relationship_counts('05c00000-0000-4000-8000-000000000003') $$,
+  $$ values (1::bigint, 0::bigint) $$, 'a declined connection is not counted');
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_p2')::uuid) $$,
+  'the target of an accepted connection can remove it');
+select is_empty($$ select 1 from public.my_relationships('05c00000-0000-4000-8000-000000000003')
+                   where relationship_id = current_setting('test.r_p2')::uuid $$,
+  'the removed connection is gone');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Fay: the declined request reads as pending (Req 8.19), a re-ask is rejected with the same
+-- PT409 (Req 8.16), and the requester removes an accepted connection (Req 8.13).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Fay claims again');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Fay again');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Fay again');
+
+select results_eq($$ select direction, status::text from public.my_relationships('05c00000-0000-4000-8000-000000000001')
+                     where relationship_id = current_setting('test.r_p3')::uuid $$,
+  $$ values ('outgoing', 'pending') $$,
+  'the requester of a declined connection reads it as pending');
+select is_empty($$ select 1 from public.my_relationships('05c00000-0000-4000-8000-000000000001')
+                   where status = 'declined' $$,
+  'Fay never reads a declined status');
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000001',
+                    '05c00000-0000-4000-8000-000000000003', 'connection') $$,
+  'PT409', 'relationship.exists', 'a re-ask after a decline gives the same error as a pending duplicate');
+select throws_ok($$ select public.respond_to_connection(current_setting('test.r_p3')::uuid, true) $$,
+  'PT404', 'relationship.not_found', 'the requester cannot answer her declined request');
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_p1')::uuid) $$,
+  'the requester of an accepted connection can remove it');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Hal: the former target re-asks and replaces the declined row (Req 8.18).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000003', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Hal claims again');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Hal again');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000003'::uuid, 'auth.uid() is Hal again');
+
+select ok(set_config('test.r_p3b', public.request_relationship('05c00000-0000-4000-8000-000000000003',
+            '05c00000-0000-4000-8000-000000000001', 'connection')::text, true) is not null,
+  'Hal, the former target, asks Fay');
+select results_eq($$ select direction, status::text from public.my_relationships('05c00000-0000-4000-8000-000000000003')
+                     where other_profile_id = '05c00000-0000-4000-8000-000000000001' $$,
+  $$ values ('outgoing', 'pending') $$,
+  'one pending request from Hal replaces the declined row');
+select isnt(current_setting('test.r_p3b'), current_setting('test.r_p3'),
+  'the replacement is a new relationship');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Ivy: a business cannot ask a person through the RPC; Ivy asks Fay; a followed business
+-- cannot remove its follower's follow.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000004', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ivy claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Ivy');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000004'::uuid, 'auth.uid() is Ivy');
+
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000011',
+                    '05c00000-0000-4000-8000-000000000001', 'connection') $$,
+  'PT422', 'relationship.business_to_person', 'acting as her business, Ivy cannot ask a person');
+select ok(set_config('test.r_p4', public.request_relationship('05c00000-0000-4000-8000-000000000004',
+            '05c00000-0000-4000-8000-000000000001', 'connection')::text, true) is not null,
+  'Ivy requests a connection to Fay');
+select throws_ok($$ select public.remove_relationship(current_setting('test.r_f1')::uuid) $$,
+  'PT404', 'relationship.not_found', 'the followed business cannot remove a follow');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Fay: decline Ivy, try to remove a pending request she received, unfollow (Req 8.14).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Fay claims a third time');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Fay a third time');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Fay a third time');
+
+select lives_ok($$ select public.respond_to_connection(current_setting('test.r_p4')::uuid, false) $$,
+  'Fay declines Ivy''s request');
+select throws_ok($$ select public.remove_relationship(current_setting('test.r_p3b')::uuid) $$,
+  'PT404', 'relationship.not_found', 'the target cannot remove a pending request');
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_f1')::uuid) $$,
+  'the follower can unfollow');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Ivy: the declined requester cannot ask again.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000004', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ivy claims again');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Ivy again');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000004'::uuid, 'auth.uid() is Ivy again');
+
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000004',
+                    '05c00000-0000-4000-8000-000000000001', 'connection') $$,
+  'PT409', 'relationship.exists', 'Ivy cannot ask Fay again after the decline');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Fay: the target deletes the decline (Req 8.17).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Fay claims a fourth time');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Fay a fourth time');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Fay a fourth time');
+
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_p4')::uuid) $$,
+  'the target of a declined connection can delete it');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Ivy: after the target deleted the decline, a new request works (Req 8.17).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000004', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ivy claims a third time');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Ivy a third time');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000004'::uuid, 'auth.uid() is Ivy a third time');
+
+select ok(set_config('test.r_p4b', public.request_relationship('05c00000-0000-4000-8000-000000000004',
+            '05c00000-0000-4000-8000-000000000001', 'connection')::text, true) is not null,
+  'Ivy can ask Fay again once Fay deleted the decline');
+select results_eq($$ select direction, status::text from public.my_relationships('05c00000-0000-4000-8000-000000000004')
+                     where other_profile_id = '05c00000-0000-4000-8000-000000000001' $$,
+  $$ values ('outgoing', 'pending') $$,
+  'the new request is pending');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Jo: a stranger cannot remove someone else's follow; a requester withdraws a pending
+-- request (Req 8.15).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000005', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Jo claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Jo');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000005'::uuid, 'auth.uid() is Jo');
+
+select throws_ok($$ select public.remove_relationship(current_setting('test.r_f2')::uuid) $$,
+  'PT404', 'relationship.not_found', 'a stranger cannot remove a relationship');
+select ok(set_config('test.r_p6', public.request_relationship('05c00000-0000-4000-8000-000000000005',
+            '05c00000-0000-4000-8000-000000000002', 'connection')::text, true) is not null,
+  'Jo requests a connection to Gus');
+select ok(set_config('test.r_p7', public.request_relationship('05c00000-0000-4000-8000-000000000005',
+            '05c00000-0000-4000-8000-000000000003', 'connection')::text, true) is not null,
+  'Jo requests a connection to Hal');
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_p7')::uuid) $$,
+  'the requester can withdraw a pending request');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Gus: decline Jo.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Gus claims again');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Gus again');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Gus again');
+
+select lives_ok($$ select public.respond_to_connection(current_setting('test.r_p6')::uuid, false) $$,
+  'Gus declines Jo''s request');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Jo: the decline reads as pending, and the requester withdraws it (Req 8.15, 8.19).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '05060606-0000-4000-8000-000000000005', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Jo claims again');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated for Jo again');
+select is(auth.uid(), '05060606-0000-4000-8000-000000000005'::uuid, 'auth.uid() is Jo again');
+
+select results_eq($$ select status::text from public.my_relationships('05c00000-0000-4000-8000-000000000005')
+                     where relationship_id = current_setting('test.r_p6')::uuid $$,
+  $$ values ('pending') $$,
+  'Jo reads Gus''s decline as pending');
+select lives_ok($$ select public.remove_relationship(current_setting('test.r_p6')::uuid) $$,
+  'the requester can withdraw a declined request');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed out visitor: counts only, and no other relationship RPC (Req 8.24, 22.4).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims in the RPC section');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon in the RPC section');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon in the RPC section');
+
+select results_eq($$ select connections, followers from public.relationship_counts('05c00000-0000-4000-8000-000000000011') $$,
+  $$ values (0::bigint, 1::bigint) $$, 'anon reads the bakery counts after Fay unfollowed');
+select results_eq($$ select connections, followers from public.relationship_counts('05c00000-0000-4000-8000-000000000002') $$,
+  $$ values (0::bigint, 0::bigint) $$, 'anon reads Gus''s counts after every connection was removed');
+select throws_ok($$ select public.request_relationship('05c00000-0000-4000-8000-000000000001',
+                    '05c00000-0000-4000-8000-000000000002', 'connection') $$,
+  '42501', null, 'anon cannot call request_relationship');
+select throws_ok($$ select * from public.my_relationships('05c00000-0000-4000-8000-000000000001') $$,
+  '42501', null, 'anon cannot call my_relationships');
+
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+
+-- What the RPCs left behind, read as the test owner.
+select set_eq($$ select requester_profile_id, target_profile_id, type::text, status::text
+                 from public.relationships where requester_profile_id::text like '05c00000-%' $$,
+  $$ values
+     ('05c00000-0000-4000-8000-000000000003'::uuid, '05c00000-0000-4000-8000-000000000001'::uuid, 'connection', 'pending'),
+     ('05c00000-0000-4000-8000-000000000004'::uuid, '05c00000-0000-4000-8000-000000000001'::uuid, 'connection', 'pending'),
+     ('05c00000-0000-4000-8000-000000000002'::uuid, '05c00000-0000-4000-8000-000000000011'::uuid, 'follow', 'accepted') $$,
+  'only the expected relationships remain after the RPC sequence');
 
 select * from finish();
 rollback;
