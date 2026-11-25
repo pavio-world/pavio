@@ -15,7 +15,7 @@ Dominic's answers to the NQ questions are recorded in **Resolved Decisions** in 
 
 ### Design decisions
 
-D-1 to D-8 are choices made while writing this design that go slightly beyond the requirement text. DR-1 to DR-3 are the design review changes recorded in `requirements.md`; D-8 states how DR-1 is implemented.
+D-1 to D-8 are choices made while writing this design that go slightly beyond the requirement text. DR-1 to DR-4 are the design review changes recorded in `requirements.md`; D-8 states how DR-1 is implemented.
 
 | Item | Choice | Why |
 |---|---|---|
@@ -30,6 +30,7 @@ D-1 to D-8 are choices made while writing this design that go slightly beyond th
 | **DR-1** Canary check | The `asUser` helper always sets `sub` and `role`, then asserts `current_user`, `auth.uid()` and `private.is_api_caller()`, failing at once if any check fails. A pgTAP canary test and a property sanity test prove a known restricted row is invisible, so no test silently runs as a Trusted_Caller. | Req 25.12, 26.3, 26.20 to 26.23. Implemented as described in D-8. |
 | **DR-2** AI usage recording | `public.ai_record_call` is executable by `service_role` only. The AI_Route checks `ai_can_call` as the signed in user and records usage through the Admin_Client. | Req 17.3, 17.4, 17.7 to 17.9, 22.11, 25.13. The browser can never report a cost. |
 | **DR-3** Property test cost | Properties default to 25 runs against the remote Database, set through `PROPERTY_RUNS`. Before the pull request the suite runs once with `PROPERTY_RUNS=100`, and both run times go in `DEVLOG.md`. | Req 26.17, 26.24, 28.11. |
+| **DR-4** Accepted definer RPC lints | Security advisor lints 0028 and 0029 (security definer functions executable through the API) are accepted only for the public security definer functions listed in **Function execute grants** below (the `anon` row and the `authenticated` row). After the final migration the security advisor reports no finding other than 0028 or 0029 on exactly that allowlist. `02_security_definer.test.sql` pins the allowlist: the set of public security definer functions executable by `anon`, and the set executable by `authenticated`, must each equal it exactly. Any other security finding is still fixed in a `fix_` migration. | Req 22.3, 22.9. |
 
 ## Overview
 
@@ -1338,7 +1339,7 @@ Every migration is applied to `pavio` with the Supabase MCP `apply_migration` to
 | 22 | `create_chat_tables` | `conversations`, `conversation_members`, `messages`, `message_translations`, `in_conversation`, RLS, grants |
 | 23 | `create_storage_buckets` | insert both buckets into `storage.buckets` (`on conflict do nothing`), `try_uuid`, `private.media_kind_allowed` (execute for `authenticated` only), storage policies with the NQ-5 path rules |
 
-If an advisor finding needs a fix after a migration is applied, the fix is a new migration (`fix_<what>`), never an edit (Req 3.6). After migration 23 the security advisor must report nothing (Req 22.9). The performance advisor's "unused index" notices are expected on an empty database and are recorded in the PR notes rather than acted on.
+If an advisor finding needs a fix after a migration is applied, the fix is a new migration (`fix_<what>`), never an edit (Req 3.6). After migration 23 the security advisor must report nothing except the 0028/0029 allowlist (DR-4, Req 22.9). The performance advisor's "unused index" notices are expected on an empty database and are recorded in the PR notes rather than acted on.
 
 ## Seed Design
 
@@ -1597,7 +1598,7 @@ Every visibility assertion and every rejected-write assertion runs after `asUser
 |---|---|
 | `00_canary.test.sql` | the canary and sanity test of Req 25.12, in the same order as `asUser`: as the test owner create persons A and B and a `connections` item owned by B; `select set_config('request.jwt.claims', json_build_object('sub', <A uid>, 'role', 'authenticated')::text, true)`; `select ok(private.is_api_caller(), 'is_api_caller is true for the simulated claims')` while still the test owner; `set local role authenticated`; `select is(current_user::text, 'authenticated')`; `select is(auth.uid(), <A uid>)`; `select is_empty('select id from public.content_items where id = <B item>')`. Then `reset role`, the same steps for `anon` (`sub` null, `auth.uid()` null). Also `ok(not has_schema_privilege('authenticated','private','USAGE'))` and the same for `anon`. No grant on `private` is made. |
 | `01_schema.test.sql` | every table has a uuid PK with `gen_random_uuid()` default and `created_at`; changing tables have an `updated_at` trigger; enum labels; every FK column has a leading index; RLS enabled on every `public` table (Req 3.5, 3.8–3.11, 25.5) |
-| `02_security_definer.test.sql` | every definer function has `prosecdef` true and `proconfig` containing `search_path=`; `private.immutable_array_to_text` is immutable with `search_path=` set (Req 7.7, 13.13, 20.14). Execute privileges: for every function in the authenticated only row of the grants table (including `view_as`), `ok(not has_function_privilege('anon', '<signature>', 'execute'))` and `ok(not has_function_privilege('public', '<signature>', 'execute'))`; for `ai_record_call`, false for `anon` and `authenticated` and true for `service_role` (Req 25.13); for every non validator `private.*` function, false for `anon` and `authenticated` |
+| `02_security_definer.test.sql` | every definer function has `prosecdef` true and `proconfig` containing `search_path=`; `private.immutable_array_to_text` is immutable with `search_path=` set (Req 7.7, 13.13, 20.14). Execute privileges: for every function in the authenticated only row of the grants table (including `view_as`), `ok(not has_function_privilege('anon', '<signature>', 'execute'))` and `ok(not has_function_privilege('public', '<signature>', 'execute'))`; for `ai_record_call`, false for `anon` and `authenticated` and true for `service_role` (Req 25.13); for every non validator `private.*` function, false for `anon` and `authenticated`. Allowlist pin (DR-4, Req 22.9): the set of public security definer functions executable by `anon`, and the set executable by `authenticated`, each equal the corresponding row of the function execute grants table exactly |
 | `03_handles_profiles.test.sql` | handle format and reserved words; a handle with capitals (`Amina`) is rejected, not lowercased, and a stored handle equals its input (D-6); case-insensitive uniqueness; a profile whose handle becomes reserved later (insert the profile, then insert that word into `reserved_handles`) can still update `display_name` and `bio`, while changing its handle to any reserved word is still rejected with `PT422 profile.handle_reserved`; language and dot-colour defaults and checks; length boundaries; one person per login; public vs private column grants; avatar and cover path kind checks (Req 4, 5) |
 | `04_business_managers.test.sql` | business details checks, owner on create, manager add/remove, last-owner protection, manager cannot delete or change roles (Req 6, 7) |
 | `05_relationships.test.sql` | each allowed and rejected shape, accept/decline, remove, decline-then-reask, status masking, `connection_accepted` only on a real pending → accepted change, counts return type (Req 8) |
@@ -1657,4 +1658,4 @@ Generators (`tests/property/arbitraries.ts`) build random profiles (person and b
 
 ### Advisors
 
-After the final migration, the MCP security advisor must report no findings (Req 22.9). Performance-advisor "unused index" notices are expected on an empty database and are listed in the PR notes rather than fixed.
+After the final migration, the MCP security advisor must report nothing except the 0028/0029 allowlist (DR-4, Req 22.9). Performance-advisor "unused index" notices are expected on an empty database and are listed in the PR notes rather than fixed.
