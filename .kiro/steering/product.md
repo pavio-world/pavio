@@ -38,6 +38,9 @@ A business can **never** start a relationship with a person. All relationships l
 - Circles are unlimited, private and silent. Nobody is ever told which circles they are in.
 - Only accepted connections (and, for businesses, followers) can be placed in circles. The owner assigns people; people never choose.
 - One person can be in many circles. Circles have free names ("the cabal", "family").
+- Every circle has a **private name** that only its owner ever sees, and an optional **member label** that the owner chooses to show to members. The private name is never shown to anyone else, anywhere.
+- The owner decides per circle with a switch, **"Show a label to people in this circle"**, which is **off by default**. Turning it on reveals a label field pre filled with the circle's private name, which the owner can keep or change. The member label is shown only while the switch is on.
+- **Story label shown to a viewer:** the circle's member label if it has one; otherwise "Only for you" if the viewer is the only member of every circle the story was shared to; otherwise a neutral "Shared with you". If a story is shared to several circles the viewer belongs to, show one member label (the first with a label), never a list.
 - Businesses get an automatic, built in audience called **all followers**, because hand assigning thousands of followers does not scale. Their other circles (suppliers, partners) are hand picked.
 
 ## Audiences
@@ -48,7 +51,7 @@ Every content item has an audience: `public`, `connections`, `circles` (one or m
 |---|---|---|
 | Writing (blog posts) | always public | none |
 | Gallery, status, vouches | chosen | none |
-| Stories (24 hours) | chosen | yes: the circle name, or "Only for you" |
+| Stories (24 hours) | chosen | yes: the circle's member label, "Only for you", or "Shared with you" (never the private circle name) |
 
 ## Page sections
 
@@ -56,7 +59,12 @@ Header (photo, name, personal dot colour, status, connect or follow button), "wh
 
 - **Status** works like Slack: a short line such as "on leave" that stays until changed.
 - **Stories** expire after 24 hours.
-- **Vouches:** every vouch is kept; the owner features up to 8 (Top 8) and can swap them at any time. Only featured Top 8 vouches count toward search trust ranking.
+- **Vouches (Top 8):** a vouch is written by an **author** about a **subject**. Every vouch is kept.
+  - The **author** features up to 8 of the vouches they have written: that is the author's **Top 8**, shown on the author's own page (MySpace style "my 8 people"). The author can swap featured vouches at any time.
+  - The **subject's** page shows the vouches they have received as endorsements. The subject can hide a received vouch from their own page but cannot edit or delete it.
+  - The **author sets the audience** of a vouch (default connections); the author may edit or delete it.
+  - **Search trust** counts how many people feature the subject in their Top 8. Unfeatured vouches do not count.
+  - Who may vouch: accepted connections only (person for person, business for business), and a person for a business they follow. A business never vouches for a person.
 - **View as:** the owner can preview their page as any connection, circle member, follower or stranger.
 - **Dot colour:** each person picks the colour of the dot in their doorway mark from a fixed palette (see design-system.md).
 
