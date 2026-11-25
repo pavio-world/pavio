@@ -41,7 +41,7 @@ docs/                     decisions, prompts
 1. **Specs first.** Every feature is built from a spec in `.kiro/specs/`. Do not build features that no spec asks for.
 2. **Database first.** Read the current migrations before writing any data access code. Never guess a column name.
 3. **Small steps.** One task at a time; keep the app building and tests passing after every task.
-4. **Commit after every completed task** with a clear message (`feat(circles): assign connections to circles`).
+4. **Atomic commits as you go**, following git.md: one logical change per commit, Conventional Commit messages, every commit leaves the project working.
 5. **Build diary.** After each completed spec task, add a short entry to `DEVLOG.md`: date, spec and task, what was built, any decision or problem worth remembering. Keep entries honest and brief.
 6. **Decisions.** When a meaningful technical choice is made, record it in `docs/decisions/NNN-title.md` (context, decision, consequences).
 7. Never commit secrets. Never edit `.env` files.

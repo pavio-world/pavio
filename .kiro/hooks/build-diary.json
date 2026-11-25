@@ -7,7 +7,7 @@
       "trigger": "PostTaskExec",
       "action": {
         "type": "agent",
-        "prompt": "A spec task just finished. Append one short entry to DEVLOG.md (create it if missing) in this format: '## <date and time> | <spec name> | <task number and title>' followed by two to four plain sentences: what was built, which files changed, any decision made, and any bug caught by a hook or test. Do not use dashes as punctuation. Then commit the task's changes with a conventional commit message. Do not change any other files."
+        "prompt": "A spec task just finished. Append one short entry to DEVLOG.md (create it if missing) in this format: '## <date and time> | <spec name> | <task number and title>' followed by two to four plain sentences: what was built, which files changed, any decision made, and any bug caught by a hook or test. Do not use dashes as punctuation. Make sure all of the task's work is already committed as atomic commits following .kiro/steering/git.md; then commit the DEVLOG entry on its own as 'docs(devlog): <spec> task <number>' and push to origin. Do not change any other files."
       },
       "enabled": true
     }
