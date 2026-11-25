@@ -29,13 +29,13 @@ fileMatchPattern: ["supabase/**", "src/lib/supabase/**", "**/*.sql"]
 
 Pavio develops against hosted Supabase projects, not a local stack.
 
-- **`pavio-dev`**: the project linked to this repo (`supabase link`). All building and testing happens here.
+- **`pavio`**: the project linked to this repo (`supabase link`). All building and testing happens here.
 - **`pavio-prod`** (if created): the public demo at pavio.world. Only receives migrations that already passed on dev.
 
 Rules:
 
 - **Migration workflow** (aligned with the supabase-hosted power):
-  1. Apply each schema change to `pavio-dev` with the Supabase MCP `apply_migration` tool, using a clear snake_case name. (`supabase db push` from a local file is an acceptable fallback if MCP is unavailable.)
+  1. Apply each schema change to `pavio` with the Supabase MCP `apply_migration` tool, using a clear snake_case name. (`supabase db push` from a local file is an acceptable fallback if MCP is unavailable.)
   2. Immediately run `supabase migration fetch --yes` so the migration lands in `supabase/migrations/` with the same version as the remote.
   3. Run the MCP `get_advisors` tool for **security and performance** and fix every security warning before moving on (missing RLS, permissive policies, mutable search paths).
   4. Regenerate types to `src/lib/supabase/types.ts` (not `types/supabase.ts`).
@@ -45,7 +45,7 @@ Rules:
 - Every test must leave no data behind: pgTAP files run inside a transaction and end with `rollback`; property tests open their own transaction per run and roll it back.
 - Enable the `pgtap` extension on the dev project (in the `extensions` schema) for database tests.
 - Generate types with `supabase gen types typescript --linked > src/lib/supabase/types.ts` after every pushed migration.
-- The direct database connection string for tests lives in `.env.local` as `SUPABASE_DB_URL` and points only at `pavio-dev`.
+- The direct database connection string for tests lives in `.env.local` as `SUPABASE_DB_URL` and points only at `pavio`.
 
 ## Seed
 

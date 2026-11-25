@@ -17,7 +17,7 @@ description: How Pavio is tested. Use when writing, running or fixing tests, inc
 
 ## Property based tests
 
-Use them wherever a requirement says "for any" or "never": visibility, audiences, circles, Top 8 limits, expiry, string key parity between English and Swahili, colour contrast of AI themes. Generate random profiles, relationships, circles and items, run them against the real `pavio-dev` database through a direct connection (`SUPABASE_DB_URL`), and assert the property. Each run happens inside its own transaction that is always rolled back, and simulates users with `set local role authenticated` plus `set local request.jwt.claims`, so RLS is tested exactly as the app experiences it and no data is left behind. Each property names the requirement it validates.
+Use them wherever a requirement says "for any" or "never": visibility, audiences, circles, Top 8 limits, expiry, string key parity between English and Swahili, colour contrast of AI themes. Generate random profiles, relationships, circles and items, run them against the real `pavio` database through a direct connection (`SUPABASE_DB_URL`), and assert the property. Each run happens inside its own transaction that is always rolled back, and simulates users with `set local role authenticated` plus `set local request.jwt.claims`, so RLS is tested exactly as the app experiences it and no data is left behind. Each property names the requirement it validates.
 
 ## Rules
 
