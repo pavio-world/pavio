@@ -6,6 +6,6 @@ A running log of how Pavio was built with Kiro for the Kiroween 2026 hackathon (
 
 Set up the `.kiro` workspace before writing any code: seven steering files (product, tech, structure and privacy always on; design system and Supabase loaded by file match; testing loaded automatically when relevant), six hooks (secret key guard, privacy tests on migration, type check, English and Swahili string parity, build diary, on demand privacy audit) and two custom reviewer agents (privacy and design). Chose a database first approach: Spec 00 designs the whole schema and the visibility engine before any feature is built.
 
-## 25 Nov 2026 | Spec 00 task 1.1 | Spec branch and spec documents
+## 25 Nov 2026 12:04 | 00-database-foundation | 1.1 Create the spec branch and commit the spec documents
 
-Created `spec/00-database-foundation` from `main` and committed the spec documents (requirements, design, tasks, config) and the spec prompt, plus the steering updates they depend on (pavio-dev renamed to pavio, product rules for circle labels, story visibility and vouches). Kiro's `tasks.meta.json` is tooling state, so it is now ignored. Three of these commits had been made directly on local `main` before the branch existed; since they were never pushed, local history was rebuilt with a soft reset onto `origin/main` and the work recommitted atomically on the spec branch, leaving `main` matching GitHub.
+Created the branch `spec/00-database-foundation` and rebuilt the three unpushed local `main` commits onto it as atomic commits, so `main` again matches GitHub. Added `tasks.meta.json` to `.gitignore` because it is Kiro tooling state. Committed the spec documents in `.kiro/specs/00-database-foundation/` and the prompt in `docs/kiro-prompts/00-database-foundation.md`.
