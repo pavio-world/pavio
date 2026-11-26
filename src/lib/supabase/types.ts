@@ -39,6 +39,47 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_usage: {
+        Row: {
+          acting_profile_id: string | null
+          cost_usd: number
+          created_at: string
+          id: string
+          request_count: number
+          updated_at: string
+          usage_day: string
+          user_id: string
+        }
+        Insert: {
+          acting_profile_id?: string | null
+          cost_usd?: number
+          created_at?: string
+          id?: string
+          request_count?: number
+          updated_at?: string
+          usage_day: string
+          user_id: string
+        }
+        Update: {
+          acting_profile_id?: string | null
+          cost_usd?: number
+          created_at?: string
+          id?: string
+          request_count?: number
+          updated_at?: string
+          usage_day?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_usage_acting_profile_id_fkey"
+            columns: ["acting_profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       app_settings: {
         Row: {
           ai_daily_call_limit: number
@@ -833,6 +874,15 @@ export type Database = {
           p_business: string
           p_person_profile: string
           p_role: Database["public"]["Enums"]["manager_role"]
+        }
+        Returns: undefined
+      }
+      ai_can_call: { Args: never; Returns: boolean }
+      ai_record_call: {
+        Args: {
+          p_acting_profile: string
+          p_cost_usd: number
+          p_user_id: string
         }
         Returns: undefined
       }
