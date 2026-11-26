@@ -127,6 +127,79 @@ export async function errorCodeOf(client: Client, fn: () => Promise<unknown>): P
   }
 }
 
+/** One `connections` item with what Property 2 needs to know about it. */
+interface ConnectionsItem {
+  id: string;
+  kind: "content" | "vouch";
+  ownerId: string;
+  subjectId: string | null;
+  expired: boolean;
+  /** True when the item is nested under a parent, whose own audience also applies (Req 20.13). */
+  nested: boolean;
+}
+
+/** All items stored with audience `connections`. */
+export function connectionsItems(fixture: Fixture): ConnectionsItem[] {
+  const content = fixture.content
+    .filter((c) => c.audience === "connections")
+    .map(
+      (c): ConnectionsItem => ({
+        id: c.id,
+        kind: "content",
+        ownerId: c.ownerId,
+        subjectId: null,
+        expired: c.expired,
+        nested: c.spec.parentPick !== null,
+      }),
+    );
+  const vouches = fixture.vouches
+    .filter((v) => v.audience === "connections")
+    .map(
+      (v): ConnectionsItem => ({
+        id: v.id,
+        kind: "vouch",
+        ownerId: v.authorId,
+        subjectId: v.subjectId,
+        expired: false,
+        nested: false,
+      }),
+    );
+  return [...content, ...vouches];
+}
+
+/**
+ * True when `viewerId` is in the owner's connections audience: an accepted
+ * connection with the owner, or, for a business owner, an accepted follow.
+ */
+export function inConnectionsAudience(fixture: Fixture, ownerId: string, viewerId: string): boolean {
+  const owner = fixture.profiles.find((p) => p.id === ownerId);
+  return fixture.relationships.some((r) => {
+    if (r.status !== "accepted") return false;
+    if (r.type === "connection") {
+      return (
+        (r.requesterId === ownerId && r.targetId === viewerId) ||
+        (r.requesterId === viewerId && r.targetId === ownerId)
+      );
+    }
+    return owner?.type === "business" && r.requesterId === viewerId && r.targetId === ownerId;
+  });
+}
+
+/**
+ * What `can_view` must answer for a `connections` item: true, false, or
+ * undefined when the model cannot tell (a nested item also depends on its parent).
+ */
+export function expectedConnectionsView(
+  fixture: Fixture,
+  viewerId: string | null,
+  item: ConnectionsItem,
+): boolean | undefined {
+  if (viewerId === null) return false;
+  if (viewerId === item.ownerId || viewerId === item.subjectId) return true;
+  if (!inConnectionsAudience(fixture, item.ownerId, viewerId)) return false;
+  if (item.expired) return false;
+  return item.nested ? undefined : true;
+}
 /** Throws when `leaked` is not empty, naming what leaked and to whom. */
 function assertNoLeak(what: string, user: SimUser, leaked: string[]): void {
   if (leaked.length > 0) {
@@ -234,6 +307,73 @@ describe("visibility properties", () => {
           },
         ),
         { numRuns: PROPERTY_RUNS },
+      );
+    },
+    PROPERTY_TIMEOUT_MS,
+  );
+
+  // Feature: 00-database-foundation, Property 2: Connections see connections items; non-connections never do
+  // **Validates: Requirements 20.6, 8.4, 8.6**
+  it(
+    "Property 2: connections see connections items; non-connections never do",
+    async () => {
+      await fc.assert(
+        fc.asyncProperty(scenarioArb, viewerArb, async (spec, viewerSpec) => {
+          await withRolledBackTx(async (client) => {
+            const fixture = await insertScenario(client, spec);
+            const user = simulatedUser(fixture, viewerSpec);
+            const items = connectionsItems(fixture);
+            if (items.length === 0) return;
+            const viewers: (string | null)[] = [null, ...user.controlled.map((p) => p.id)];
+            await asUser(client, user.role, user.sub);
+            try {
+              // can_view, per viewer profile (and signed out).
+              for (const viewer of viewers) {
+                const res = await client.query<{ id: string; ok: boolean }>(
+                  "select t.id, public.can_view(t.id, $1) as ok from unnest($2::uuid[]) as t(id)",
+                  [viewer, items.map((i) => i.id)],
+                );
+                const answers = new Map(res.rows.map((r) => [r.id, r.ok]));
+                for (const item of items) {
+                  const expected = expectedConnectionsView(fixture, viewer, item);
+                  if (expected !== undefined && answers.get(item.id) !== expected) {
+                    throw new Error(
+                      `can_view(${item.kind} ${item.id}) as ${String(viewer)}: got ${String(answers.get(item.id))}, expected ${String(expected)}`,
+                    );
+                  }
+                }
+              }
+              // RLS reads: an item is returned when any profile of the login may see it.
+              for (const [table, kind] of [
+                ["content_items", "content"],
+                ["vouches", "vouch"],
+              ] as const) {
+                const res = await client.query<{ id: string }>(`select id from public.${table}`);
+                const seen = new Set(res.rows.map((r) => r.id));
+                for (const item of items.filter((i) => i.kind === kind)) {
+                  const answers = viewers.map((v) => expectedConnectionsView(fixture, v, item));
+                  // Seen when any profile may see it; unknown when only nested answers remain.
+                  const expected = answers.includes(true)
+                    ? true
+                    : answers.includes(undefined)
+                      ? undefined
+                      : false;
+                  if (expected === undefined) continue;
+                  if (seen.has(item.id) !== expected) {
+                    throw new Error(
+                      `select from ${table}: ${item.id} seen=${String(seen.has(item.id))}, expected ${String(expected)} for ${user.role} ${user.sub ?? "(signed out)"}`,
+                    );
+                  }
+                }
+              }
+            } finally {
+              await resetRole(client);
+            }
+          });
+        }),
+        // endOnFailure: a world takes 10 to 30 s over the pooler, so shrinking could not finish
+        // inside PROPERTY_TIMEOUT_MS and a failure would show up only as a timeout.
+        { numRuns: PROPERTY_RUNS, endOnFailure: true },
       );
     },
     PROPERTY_TIMEOUT_MS,
