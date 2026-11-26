@@ -1,12 +1,12 @@
 -- Signals: notifications, profile views and search appearances (Spec 00, Req 15, 16, 25.1, 25.2; DR-1).
--- The notifications table part comes first (task 10). Profile views (task 21), search appearances
--- (task 22) and the weekly summary (task 23) add their own sections below, each with its own
--- fixtures, and raise the plan count.
+-- The notifications table part comes first (task 10), then profile views (task 21). Search
+-- appearances (task 22) and the weekly summary (task 23) add their own sections below, and raise
+-- the plan count. The profile views section reuses the notifications fixtures.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(57);
+select plan(126);
 
 -- =============================================================================================
 -- Notifications table (task 10; Req 15.1, 15.2, 15.10 to 15.13)
@@ -223,6 +223,221 @@ select throws_ok($$ insert into public.notifications (recipient_profile_id, type
 
 set local role postgres;
 select set_config('request.jwt.claims', '', true);
+
+-- =============================================================================================
+-- Profile views (task 21; Req 15.7, 15.10, 16.1 to 16.5, 25.1, 25.2)
+-- Reuses the fixtures above: Rita, Otto and Mark are people, Mark manages mark_shop.
+-- =============================================================================================
+
+-- ---------------------------------------------------------------------------------------------
+-- Catalog: columns, keys, indexes, RLS, policy, grants, trigger and function privileges.
+-- ---------------------------------------------------------------------------------------------
+select has_table('public', 'profile_views', 'profile_views exists');
+select columns_are('public', 'profile_views', array[
+  'id', 'viewed_profile_id', 'viewer_profile_id', 'viewed_on', 'viewed_at', 'created_at'
+], 'profile_views has exactly its six columns (Req 16.1)');
+select col_type_is('public', 'profile_views', 'viewed_on', 'date', 'viewed_on is a date');
+select col_not_null('public', 'profile_views', 'viewed_on', 'a view always has a Nairobi day');
+select is((select count(*)::int from pg_catalog.pg_constraint
+           where conrelid = 'public.profile_views'::regclass and contype = 'f'
+             and confrelid = 'public.profiles'::regclass and confdeltype = 'c'),
+  2, 'both profile foreign keys cascade on delete');
+select has_index('public', 'profile_views', 'profile_views_viewer_profile_id_idx', 'viewer_profile_id',
+  'profile_views has the viewer index');
+select has_index('public', 'profile_views', 'profile_views_viewed_on_idx',
+  array['viewed_profile_id', 'viewed_on'], 'profile_views has the viewed page and day index');
+select ok((select relrowsecurity from pg_class where oid = 'public.profile_views'::regclass),
+  'RLS is enabled on profile_views');
+select policies_are('public', 'profile_views', array['profile_views_authenticated_select'],
+  'profile_views has exactly its one policy');
+select table_privs_are('public', 'profile_views', 'anon', array[]::text[],
+  'anon has no privilege on profile_views (Req 16.2)');
+select table_privs_are('public', 'profile_views', 'authenticated', array['SELECT'],
+  'authenticated holds only select on profile_views');
+select ok(not has_any_column_privilege(r, 'public.profile_views', p),
+  r || ' has no ' || p || ' privilege on profile_views')
+from unnest(array['anon', 'authenticated']) as r, unnest(array['INSERT', 'UPDATE']) as p;
+select has_trigger('public', 'profile_views', 'profile_views_after_insert',
+  'profile_views has the notification trigger');
+select is_definer('public', 'record_profile_view', array['uuid', 'uuid'],
+  'record_profile_view is security definer');
+select ok(exists (select 1 from pg_catalog.unnest((select proconfig from pg_catalog.pg_proc
+                    where oid = 'public.record_profile_view(uuid, uuid)'::regprocedure)) c
+                  where c = 'search_path=""'),
+  'record_profile_view sets an empty search_path');
+select ok(not has_function_privilege(r, 'public.record_profile_view(uuid, uuid)', 'execute'),
+  r || ' cannot execute record_profile_view')
+from unnest(array['public', 'anon']) as r;
+select ok(has_function_privilege('authenticated', 'public.record_profile_view(uuid, uuid)', 'execute'),
+  'authenticated can execute record_profile_view');
+select ok(not has_function_privilege(r, 'private.profile_views_after_insert()', 'execute'),
+  r || ' cannot execute the notification trigger function')
+from unnest(array['public', 'anon', 'authenticated']) as r;
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Rita, in the canary order (DR-1): repeated views give one row (Req 16.4).
+-- ---------------------------------------------------------------------------------------------
+select set_config('request.jwt.claims',
+  json_build_object('sub', 'a1a1a1a1-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Rita claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), 'a1a1a1a1-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Rita');
+
+select lives_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                     'b2b2b2b2-0000-4000-8000-000000000002') $$,
+  'Rita views Otto''s page');
+select lives_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                     'b2b2b2b2-0000-4000-8000-000000000002') $$,
+  'Rita views Otto''s page a second time on the same day');
+select lives_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                     'b2b2b2b2-0000-4000-8000-000000000002') $$,
+  'Rita views Otto''s page a third time on the same day');
+select is((select count(*)::int from public.profile_views
+           where viewer_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+             and viewed_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002'),
+  1, 'three views on one Nairobi day leave one row, readable by the viewer (Req 16.4, 16.5)');
+select is((select viewed_on from public.profile_views
+           where viewer_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+             and viewed_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002'),
+  (now() at time zone 'Africa/Nairobi')::date, 'the row holds the Nairobi day');
+
+-- Rejections (Req 16.2, 16.3).
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000002',
+                                                      'b2b2b2b2-0000-4000-8000-000000000001') $$,
+  'PT403', 'acting.not_allowed', 'Rita cannot record a view as Otto');
+select throws_ok($$ select public.record_profile_view('d4d4d4d4-0000-4000-8000-000000000099',
+                                                      'b2b2b2b2-0000-4000-8000-000000000001') $$,
+  'PT403', 'acting.not_allowed', 'a viewer profile that does not exist is refused');
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                      'b2b2b2b2-0000-4000-8000-000000000001') $$,
+  'PT422', 'profile_view.own_page', 'Rita cannot view her own page (Req 16.3)');
+-- No direct writes (Req 16.2).
+select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
+                    values ('b2b2b2b2-0000-4000-8000-000000000003', 'b2b2b2b2-0000-4000-8000-000000000001', current_date) $$,
+  '42501', null, 'authenticated cannot insert a profile view directly');
+select throws_ok($$ update public.profile_views set viewed_on = current_date $$,
+  '42501', null, 'authenticated cannot update a profile view');
+select throws_ok($$ delete from public.profile_views $$,
+  '42501', null, 'authenticated cannot delete a profile view');
+
+-- A page managed by someone else is a normal page: Rita views the business.
+select lives_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                     'b2b2b2b2-0000-4000-8000-000000000004') $$,
+  'Rita views the mark_shop page');
+select is((select count(*)::int from public.profile_views), 2,
+  'Rita reads exactly the two views she made (Req 16.5)');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Mark: he manages mark_shop, so his own pages are refused (Req 16.3).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', 'a1a1a1a1-0000-4000-8000-000000000003', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Mark claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), 'a1a1a1a1-0000-4000-8000-000000000003'::uuid, 'auth.uid() is Mark');
+
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000003',
+                                                      'b2b2b2b2-0000-4000-8000-000000000004') $$,
+  'PT422', 'profile_view.own_page', 'Mark as himself cannot view the business he manages');
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000004',
+                                                      'b2b2b2b2-0000-4000-8000-000000000003') $$,
+  'PT422', 'profile_view.own_page', 'Mark as his business cannot view his own person page');
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                      'b2b2b2b2-0000-4000-8000-000000000002') $$,
+  'PT403', 'acting.not_allowed', 'Mark cannot record a view as Rita');
+select lives_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000004',
+                                                     'b2b2b2b2-0000-4000-8000-000000000001') $$,
+  'Mark acting as mark_shop views Rita''s page');
+select is((select count(*)::int from public.profile_views), 2,
+  'Mark reads the view of mark_shop (viewed) and the view by mark_shop (viewer) (Req 16.5)');
+select is_empty($$ select 1 from public.profile_views
+                   where viewed_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002' $$,
+  'Mark cannot read Rita''s view of Otto');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Otto: he reads only the view of his own page (Req 16.5).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', 'a1a1a1a1-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Otto claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), 'a1a1a1a1-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Otto');
+
+select results_eq($$ select viewer_profile_id from public.profile_views $$,
+  array['b2b2b2b2-0000-4000-8000-000000000001'::uuid],
+  'Otto reads only Rita''s view of his page, not the other views');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed out visitor: no read, no execute, no write (Req 16.2, 22.5).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+
+select throws_ok($$ select 1 from public.profile_views $$,
+  '42501', null, 'anon cannot read profile views');
+select throws_ok($$ select public.record_profile_view('b2b2b2b2-0000-4000-8000-000000000001',
+                                                      'b2b2b2b2-0000-4000-8000-000000000002') $$,
+  '42501', null, 'anon cannot execute record_profile_view');
+select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
+                    values ('b2b2b2b2-0000-4000-8000-000000000002', 'b2b2b2b2-0000-4000-8000-000000000001', current_date) $$,
+  '42501', null, 'anon cannot insert a profile view directly');
+
+-- ---------------------------------------------------------------------------------------------
+-- Back as the test owner: the notifications and the table rules (Req 15.7, 15.10, 16.4).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+
+select is((select count(*)::int from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002' and type = 'profile_viewed'),
+  1, 'three views by Rita on one day give Otto one profile_viewed notification (Req 15.7, 16.4)');
+select is((select data from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002' and type = 'profile_viewed'),
+  '{"actor_handle": "rita_s", "actor_display_name": "Rita", "actor_type": "person"}'::jsonb,
+  'the notification data holds only the viewer''s handle, name and type (Req 15.10)');
+select is((select row(actor_profile_id, reference_id)::text from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002' and type = 'profile_viewed'),
+  (select row(viewer_profile_id, id)::text from public.profile_views
+   where viewer_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+     and viewed_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002'),
+  'the notification names the viewer as actor and the view row as reference');
+select is((select data from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001' and type = 'profile_viewed'),
+  '{"actor_handle": "mark_shop", "actor_display_name": "Mark''s Shop", "actor_type": "business"}'::jsonb,
+  'a view by a business page notifies the viewed person with the business as actor');
+select is_empty($$ select 1 from public.notifications n, jsonb_object_keys(n.data) as k
+                   where n.type = 'profile_viewed'
+                     and k not in ('actor_handle', 'actor_display_name', 'actor_type') $$,
+  'no profile_viewed notification holds any field beyond the allowed ones (Req 15.10)');
+select is((select count(*)::int from public.notifications
+           where type = 'profile_viewed'
+             and recipient_profile_id in (select id from public.profiles where handle in ('rita_s', 'otto_s', 'mark_s', 'mark_shop'))),
+  3, 'rejected views created no notification: Otto, mark_shop and Rita have one each');
+
+-- A new Nairobi day is a new row and a new notification.
+select lives_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
+                   values ('b2b2b2b2-0000-4000-8000-000000000002', 'b2b2b2b2-0000-4000-8000-000000000001',
+                           (now() at time zone 'Africa/Nairobi')::date - 1) $$,
+  'a view on the previous Nairobi day is a different row');
+select is((select count(*)::int from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002' and type = 'profile_viewed'),
+  2, 'the next day''s view gives a second notification');
+select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
+                    values ('b2b2b2b2-0000-4000-8000-000000000002', 'b2b2b2b2-0000-4000-8000-000000000001',
+                            (now() at time zone 'Africa/Nairobi')::date) $$,
+  '23505', null, 'the table itself keeps one row per viewer, page and day (Req 16.4)');
+select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
+                    values ('b2b2b2b2-0000-4000-8000-000000000001', 'b2b2b2b2-0000-4000-8000-000000000001', current_date) $$,
+  '23514', null, 'the table itself rejects a view of one''s own page (Req 16.3)');
 
 select * from finish();
 rollback;
