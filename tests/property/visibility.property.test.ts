@@ -579,4 +579,141 @@ describe("visibility properties", () => {
     },
     PROPERTY_TIMEOUT_MS,
   );
+
+  // Feature: 00-database-foundation, Property 5: An expired story is visible only to its owner
+  // **Validates: Requirements 20.4, 20.2, 11.10**
+  it(
+    "Property 5: an expired story is visible only to its owner",
+    async () => {
+      await fc.assert(
+        fc.asyncProperty(scenarioArb, viewerArb, fc.nat(1000), async (spec, viewerSpec, viewAsPick) => {
+          await withRolledBackTx(async (client) => {
+            const fixture = await insertScenario(client, spec);
+            // Expired stories of any audience, including ones whose audience contains the viewer.
+            const stories = fixture.content.filter((c) => c.contentType === "story" && c.expired);
+            if (stories.length === 0) return;
+            const storyIds = stories.map((s) => s.id);
+            const ownerOf = new Map(stories.map((s) => [s.id, s.ownerId]));
+            const user = simulatedUser(fixture, viewerSpec);
+            const viewers: (string | null)[] = [null, ...user.controlled.map((p) => p.id)];
+            const controlledIds = new Set(user.controlled.map((p) => p.id));
+
+            // Part 1: the sampled caller, as signed out and as each profile it controls.
+            await asUser(client, user.role, user.sub);
+            try {
+              // can_view: true only when the viewer is the owner.
+              for (const viewer of viewers) {
+                const res = await client.query<{ id: string; ok: boolean }>(
+                  "select t.id, public.can_view(t.id, $1) as ok from unnest($2::uuid[]) as t(id)",
+                  [viewer, storyIds],
+                );
+                for (const row of res.rows) {
+                  const expected = viewer !== null && ownerOf.get(row.id) === viewer;
+                  if (row.ok !== expected) {
+                    throw new Error(
+                      `can_view(expired story ${row.id}) as ${String(viewer)}: got ${String(row.ok)}, expected ${String(expected)}`,
+                    );
+                  }
+                }
+              }
+
+              // RLS read: seen only when the login controls the owner.
+              const rls = await client.query<{ id: string }>("select id from public.content_items");
+              const seen = new Set(rls.rows.map((r) => r.id));
+              for (const story of stories) {
+                const expected = controlledIds.has(story.ownerId);
+                if (seen.has(story.id) !== expected) {
+                  throw new Error(
+                    `select from content_items: expired story ${story.id} seen=${String(seen.has(story.id))}, expected ${String(expected)} for ${user.role} ${user.sub ?? "(signed out)"}`,
+                  );
+                }
+              }
+
+              // page_items of every story owner, as every viewer other than that owner.
+              const owners = [...new Set(stories.map((s) => s.ownerId))];
+              for (const viewer of viewers) {
+                const res = await client.query<{ owner: string; item_id: string }>(
+                  `select o.id as owner, pi.item_id
+                   from unnest($1::uuid[]) as o(id), lateral public.page_items(o.id, $2) as pi
+                   where o.id is distinct from $2::uuid`,
+                  [owners, viewer],
+                );
+                const leaked = res.rows.map((r) => r.item_id).filter((id) => ownerOf.has(id));
+                if (leaked.length > 0) {
+                  throw new Error(
+                    `page_items as ${String(viewer)}: expired stor(ies) ${leaked.join(", ")} returned to a non-owner`,
+                  );
+                }
+              }
+
+              // story_label returns no row for an expired story, whoever asks.
+              for (const viewer of viewers) {
+                const res = await client.query(
+                  `select sl.kind from unnest($1::uuid[]) as t(id), lateral public.story_label(t.id, $2) as sl`,
+                  [storyIds, viewer],
+                );
+                if (res.rows.length > 0) {
+                  throw new Error(`story_label returned ${res.rows.length} row(s) for expired stories as ${String(viewer)}`);
+                }
+              }
+            } finally {
+              await resetRole(client);
+            }
+
+            // Part 2: each story owner (their own login) still sees the story, and view_as
+            // with a simulated viewer other than the owner never lists it.
+            const ownerProfiles = fixture.profiles.filter((p) => stories.some((s) => s.ownerId === p.id));
+            for (const owner of ownerProfiles) {
+              const mine = stories.filter((s) => s.ownerId === owner.id).map((s) => s.id);
+              await asUser(client, "authenticated", owner.userId);
+              try {
+                const res = await client.query<{ id: string; ok: boolean }>(
+                  "select t.id, public.can_view(t.id, $1) as ok from unnest($2::uuid[]) as t(id)",
+                  [owner.id, mine],
+                );
+                const notOk = res.rows.filter((r) => !r.ok).map((r) => r.id);
+                if (notOk.length > 0) {
+                  throw new Error(`owner ${owner.handle} cannot can_view own expired stor(ies) ${notOk.join(", ")}`);
+                }
+                const rls = await client.query<{ id: string }>("select id from public.content_items");
+                const seen = new Set(rls.rows.map((r) => r.id));
+                const missing = mine.filter((id) => !seen.has(id));
+                if (missing.length > 0) {
+                  throw new Error(`owner ${owner.handle} cannot read own expired stor(ies) ${missing.join(", ")} through RLS`);
+                }
+                const labels = await client.query(
+                  `select sl.kind from unnest($1::uuid[]) as t(id), lateral public.story_label(t.id, $2) as sl`,
+                  [mine, owner.id],
+                );
+                if (labels.rows.length > 0) {
+                  throw new Error(`story_label returned a row for owner ${owner.handle}'s expired story`);
+                }
+                const simulated = pick(
+                  fixture.profiles.filter((p) => p.id !== owner.id),
+                  viewAsPick,
+                );
+                for (const asViewer of [null, simulated?.id ?? null]) {
+                  const view = await client.query<{ item_id: string }>(
+                    "select item_id from public.view_as($1, $2)",
+                    [owner.id, asViewer],
+                  );
+                  const leaked = view.rows.map((r) => r.item_id).filter((id) => mine.includes(id));
+                  if (leaked.length > 0) {
+                    throw new Error(
+                      `view_as(${owner.handle}) as ${String(asViewer)} listed expired stor(ies) ${leaked.join(", ")}`,
+                    );
+                  }
+                }
+              } finally {
+                await resetRole(client);
+              }
+            }
+          });
+        }),
+        // endOnFailure: see Property 2.
+        { numRuns: PROPERTY_RUNS, endOnFailure: true },
+      );
+    },
+    PROPERTY_TIMEOUT_MS,
+  );
 });
