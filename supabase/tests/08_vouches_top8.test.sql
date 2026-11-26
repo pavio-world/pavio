@@ -1,13 +1,13 @@
 -- Vouches and Top 8: the vouch RPCs, eligibility, author and subject rights, the Top 8 rules and
--- the vouch_received notification (Spec 00, Req 14.5 to 14.18, 14.21, 14.23, 15.10, 25.1 to 25.4;
--- NQ-2; DR-1).
+-- the vouch_received notification, and hidden vouches on page listings (Spec 00, Req 14.5 to
+-- 14.21, 14.23, 15.10, 25.1 to 25.4, 25.8; NQ-2; DR-1).
 -- The RPC part comes first (task 16). Page listings of hidden vouches (task 20) and Search_Trust
 -- (task 22) add their own sections below, each with its own fixtures, and raise the plan count.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(127);
+select plan(144);
 
 -- =============================================================================================
 -- Vouch RPCs, eligibility, rights and Top 8 (task 16)
@@ -479,7 +479,99 @@ select is((select n.data ->> 'actor_handle' from public.notifications n
   'cafe_vt', 'a business author is named by its own handle');
 
 -- =============================================================================================
--- Hidden vouches on page listings (task 20) and Search_Trust (task 22) are added below.
+-- Hidden vouches on page listings (task 20; Req 14.19 to 14.21, 25.8). Search_Trust (task 22) is
+-- added below.
+-- Vouch 02 (Ada about Cal, circles inner, which holds Ben) is hidden by Cal. Ada features it
+-- again at position 2, next to vouch 01 (Ada about Ben, public) at position 1.
+-- =============================================================================================
+update public.vouches set top8_position = 2 where id = '08f00000-0000-4000-8000-000000000002';
+select lives_ok($$ set constraints all immediate $$, 'Ada features the hidden vouch again; every deferred check passes');
+set constraints all deferred;
+select ok((select hidden_by_subject and top8_position = 2 from public.vouches
+           where id = '08f00000-0000-4000-8000-000000000002'),
+  'vouch 02 is hidden by its subject and featured by its author');
+
+-- Absent from the subject's page for every viewer (Req 14.20).
+select isnt_empty(
+  $$ select 1 from private.page_items('08b00000-0000-4000-8000-000000000002', null)
+     where section = 'received' and item_id = '08f00000-0000-4000-8000-000000000001' $$,
+  'an unhidden received vouch is listed on its subject''s page, so the next check is not vacuous');
+select is_empty(
+  $$ select v.viewer, p.section
+     from (values ('08b00000-0000-4000-8000-000000000003'::uuid), ('08b00000-0000-4000-8000-000000000001'::uuid),
+                  ('08b00000-0000-4000-8000-000000000002'::uuid), ('08b00000-0000-4000-8000-000000000004'::uuid),
+                  (null::uuid)) as v(viewer)
+     cross join lateral private.page_items('08b00000-0000-4000-8000-000000000003', v.viewer) p
+     where p.item_id = '08f00000-0000-4000-8000-000000000002' $$,
+  'the hidden vouch is absent from Cal''s page for Cal, Ada, Ben, Dot and signed out (Req 14.20)');
+
+-- Present in the author's Top 8, subject to can_view (Req 14.19).
+select set_eq(
+  $$ select item_id, top8_position::int from private.page_items('08b00000-0000-4000-8000-000000000001',
+                                                                '08b00000-0000-4000-8000-000000000001')
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid, 1), ('08f00000-0000-4000-8000-000000000002'::uuid, 2) $$,
+  'Ada''s own view of her Top 8 holds the hidden vouch');
+select set_eq(
+  $$ select item_id from private.page_items('08b00000-0000-4000-8000-000000000001',
+                                            '08b00000-0000-4000-8000-000000000002')
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid), ('08f00000-0000-4000-8000-000000000002'::uuid) $$,
+  'Ben, in the vouch''s circle, sees the hidden vouch in Ada''s Top 8 (Req 14.19)');
+select set_eq(
+  $$ select item_id from private.page_items('08b00000-0000-4000-8000-000000000001',
+                                            '08b00000-0000-4000-8000-000000000003')
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid), ('08f00000-0000-4000-8000-000000000002'::uuid) $$,
+  'Cal, the subject who hid it, still sees it in Ada''s Top 8');
+select set_eq(
+  $$ select item_id from private.page_items('08b00000-0000-4000-8000-000000000001',
+                                            '08b00000-0000-4000-8000-000000000004')
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid) $$,
+  'Dot, outside the circle, sees only the public featured vouch');
+select set_eq(
+  $$ select item_id from private.page_items('08b00000-0000-4000-8000-000000000001', null)
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid) $$,
+  'signed out sees only the public featured vouch');
+
+-- Still readable by the subject (Req 14.21), signed in as Cal in the canary order (DR-1).
+select set_config('request.jwt.claims',
+  json_build_object('sub', '08080808-0000-4000-8000-000000000003', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Cal claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '08080808-0000-4000-8000-000000000003'::uuid, 'auth.uid() is Cal');
+
+select results_eq(
+  $$ select vouch_id, hidden_by_subject from public.my_received_vouches('08b00000-0000-4000-8000-000000000003') $$,
+  $$ values ('08f00000-0000-4000-8000-000000000002'::uuid, true) $$,
+  'Cal still reads the hidden vouch through my_received_vouches, so he can unhide it (Req 14.21)');
+select results_eq(
+  $$ select id, body from public.vouches where id = '08f00000-0000-4000-8000-000000000002' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000002'::uuid, 'Cal tells the truth'::text) $$,
+  'Cal still reads the hidden vouch through RLS');
+select set_eq(
+  $$ select item_id from public.page_items('08b00000-0000-4000-8000-000000000001',
+                                           '08b00000-0000-4000-8000-000000000003')
+     where section = 'top8' $$,
+  $$ values ('08f00000-0000-4000-8000-000000000001'::uuid), ('08f00000-0000-4000-8000-000000000002'::uuid) $$,
+  'Cal sees the hidden vouch in Ada''s Top 8 through page_items');
+select is_empty(
+  $$ select 1 from public.page_items('08b00000-0000-4000-8000-000000000003', '08b00000-0000-4000-8000-000000000003')
+     where item_id = '08f00000-0000-4000-8000-000000000002' $$,
+  'the hidden vouch is absent from Cal''s own page listing through page_items');
+select is_empty(
+  $$ select 1 from public.view_as('08b00000-0000-4000-8000-000000000003', '08b00000-0000-4000-8000-000000000003')
+     where item_id = '08f00000-0000-4000-8000-000000000002' $$,
+  'the hidden vouch is absent from Cal''s preview of his own page');
+
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+
+-- =============================================================================================
+-- Search_Trust (task 22) is added below.
 -- =============================================================================================
 
 select * from finish();
