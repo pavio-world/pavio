@@ -1,14 +1,15 @@
 -- Content items, vouches, item circle links and can_view: every can_view branch, the content and
 -- vouch guards, the deferred circles checks (D-7), the details and path kind checks (NQ-5 and the
 -- fix_content_image_path_kind rule), RLS reads filtered by can_view and column silence (D-3),
--- and the content RPCs create_content_item, set_item_audience and item_audience (task 16).
--- Spec 00 Req 11.4 to 11.13, 11.15, 11.16, 20.2 to 20.8, 20.10 to 20.13, 20.15, 25.1 to 25.4;
--- D-3, D-7.
+-- the content RPCs create_content_item, set_item_audience and item_audience (task 16), and
+-- story views with story_views_guard and their RLS (task 18).
+-- Spec 00 Req 11.4 to 11.13, 11.15, 11.16, 12.1 to 12.6, 20.2 to 20.8, 20.10 to 20.13, 20.15,
+-- 25.1 to 25.4; D-3, D-7.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(287);
+select plan(346);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims (a trusted caller, so stories can be back-dated).
@@ -932,6 +933,174 @@ select set_config('request.jwt.claims', '', true);
 select is_empty($$ select 1 from public.item_circles
                    where content_item_id = current_setting('pavio_test.rpc1')::uuid $$,
   'no link of the RPC item is left behind');
+
+-- ---------------------------------------------------------------------------------------------
+-- Story views (task 18; Req 12.1 to 12.6, 22.1 to 22.3, 22.5, 25.1, 25.2, 25.4).
+-- Stories used: 05 public live, 06 connections live, 07 public expired (all Ann's).
+-- Non stories: 01 public writing (visible to all), 12 Shop's all followers gallery (hidden from Bo).
+-- ---------------------------------------------------------------------------------------------
+select ok((select relrowsecurity from pg_class where oid = 'public.story_views'::regclass),
+  'RLS is enabled on story_views');
+select policies_are('public', 'story_views', array[
+  'story_views_authenticated_select', 'story_views_authenticated_insert'
+], 'story_views has exactly its two policies');
+select table_privs_are('public', 'story_views', 'anon', array[]::text[], 'anon has no table privilege on story_views');
+select table_privs_are('public', 'story_views', 'authenticated', array['SELECT'],
+  'authenticated has only SELECT at table level on story_views');
+select ok(has_column_privilege('authenticated', 'public.story_views', c, 'INSERT'),
+  'authenticated can insert story_views.' || c)
+from unnest(array['story_id', 'viewer_profile_id']) as c;
+select ok(not has_column_privilege('authenticated', 'public.story_views', c, 'INSERT'),
+  'authenticated cannot insert story_views.' || c)
+from unnest(array['id', 'viewed_at', 'created_at']) as c;
+select ok(not has_any_column_privilege('anon', 'public.story_views', p), 'anon has no column ' || p || ' on story_views')
+from unnest(array['INSERT', 'UPDATE']) as p;
+select ok(not has_any_column_privilege('authenticated', 'public.story_views', 'UPDATE'),
+  'authenticated cannot update any story_views column');
+select trigger_is('public', 'story_views', 'story_views_guard', 'private', 'story_views_guard',
+  'story_views_guard calls private.story_views_guard');
+select has_index('public', 'story_views', 'story_views_viewer_profile_id_idx', 'viewer_profile_id',
+  'story_views has the viewer index');
+select col_is_unique('public', 'story_views', array['story_id', 'viewer_profile_id'],
+  'story_views is unique on story and viewer (Req 12.2)');
+select ok(not has_function_privilege(r, 'private.story_views_guard()', 'execute'),
+  r || ' cannot execute private.story_views_guard')
+from unnest(array['public', 'anon', 'authenticated']) as r;
+
+-- Signed in as Bo, a connection of Ann.
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Bo claims (story views)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Bo');
+
+select lives_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                   values ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000002')
+                   on conflict (story_id, viewer_profile_id) do nothing $$,
+  'Bo records a view of a connections story he can see (Req 12.1)');
+select lives_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                   values ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000002')
+                   on conflict (story_id, viewer_profile_id) do nothing $$,
+  'recording the same view again with on conflict do nothing runs');
+select is((select count(*)::int from public.story_views
+           where story_id = '07d00000-0000-4000-8000-000000000006'
+             and viewer_profile_id = '07b00000-0000-4000-8000-000000000002'), 1,
+  'a story and viewer keep a single row (Req 12.2)');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000002') $$,
+  '23505', null, 'a plain duplicate insert is rejected by the unique constraint');
+select lives_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                   values ('07d00000-0000-4000-8000-000000000005', '07b00000-0000-4000-8000-000000000002')
+                   on conflict (story_id, viewer_profile_id) do nothing $$,
+  'Bo records a view of a live public story');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000007', '07b00000-0000-4000-8000-000000000002')
+                    on conflict (story_id, viewer_profile_id) do nothing $$,
+  '42501', null, 'Bo cannot record a view of an expired story (Req 12.3)');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000001', '07b00000-0000-4000-8000-000000000002')
+                    on conflict (story_id, viewer_profile_id) do nothing $$,
+  'PT422', 'story_view.not_a_story', 'a view of a visible item that is not a story is rejected (Req 12.4)');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000012', '07b00000-0000-4000-8000-000000000002') $$,
+  '42501', null, 'a view of an item Bo cannot see is refused without revealing that it is not a story');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000001')
+                    on conflict (story_id, viewer_profile_id) do nothing $$,
+  '42501', null, 'Bo cannot record a view as Ann (Req 12.6)');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id, viewed_at)
+                    values ('07d00000-0000-4000-8000-000000000005', '07b00000-0000-4000-8000-000000000002', now()) $$,
+  '42501', null, 'Bo cannot set viewed_at');
+select throws_ok($$ update public.story_views set viewed_at = now()
+                    where viewer_profile_id = '07b00000-0000-4000-8000-000000000002' $$,
+  '42501', null, 'Bo cannot update a story view');
+select throws_ok($$ delete from public.story_views where viewer_profile_id = '07b00000-0000-4000-8000-000000000002' $$,
+  '42501', null, 'Bo cannot delete a story view');
+select set_eq($$ select story_id from public.story_views $$,
+  $$ values ('07d00000-0000-4000-8000-000000000005'::uuid), ('07d00000-0000-4000-8000-000000000006') $$,
+  'Bo reads his own two views (Req 12.5)');
+
+-- Signed in as Di, a stranger to Ann.
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000004', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Di claims (story views)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000004'::uuid, 'auth.uid() is Di');
+
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000004')
+                    on conflict (story_id, viewer_profile_id) do nothing $$,
+  '42501', null, 'Di cannot record a view of a connections story she cannot see (Req 12.3)');
+select lives_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                   values ('07d00000-0000-4000-8000-000000000005', '07b00000-0000-4000-8000-000000000004')
+                   on conflict (story_id, viewer_profile_id) do nothing $$,
+  'Di records a view of the live public story');
+select set_eq($$ select story_id, viewer_profile_id from public.story_views $$,
+  $$ values ('07d00000-0000-4000-8000-000000000005'::uuid, '07b00000-0000-4000-8000-000000000004'::uuid) $$,
+  'Di reads only her own view, not Bo''s');
+
+-- Signed in as Cy, a connection of Ann who is neither a viewer nor the owner.
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000003', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Cy claims (story views)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000003'::uuid, 'auth.uid() is Cy');
+
+select is_empty($$ select 1 from public.story_views $$,
+  'Cy reads no story views, even of stories she can see (Req 25.1)');
+
+-- Signed in as Ann, the story owner.
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ann claims (story views)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Ann');
+
+select set_eq($$ select story_id, viewer_profile_id from public.story_views $$,
+  $$ values ('07d00000-0000-4000-8000-000000000005'::uuid, '07b00000-0000-4000-8000-000000000002'::uuid),
+            ('07d00000-0000-4000-8000-000000000006', '07b00000-0000-4000-8000-000000000002'),
+            ('07d00000-0000-4000-8000-000000000005', '07b00000-0000-4000-8000-000000000004') $$,
+  'Ann reads every view of her stories (Req 12.5, OQ-6)');
+select lives_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                   values ('07d00000-0000-4000-8000-000000000007', '07b00000-0000-4000-8000-000000000001')
+                   on conflict (story_id, viewer_profile_id) do nothing $$,
+  'the owner may record a view of her own expired story, which can_view allows her');
+
+-- Signed out visitor: no read and no write (Req 22.5).
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims (story views)');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+
+select throws_ok($$ select 1 from public.story_views $$, '42501', null, 'anon cannot read story views');
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000005', '07b00000-0000-4000-8000-000000000003')
+                    on conflict (story_id, viewer_profile_id) do nothing $$,
+  '42501', null, 'anon cannot record a story view, even of a public story');
+select throws_ok($$ update public.story_views set viewed_at = now() $$, '42501', null, 'anon cannot update story views');
+select throws_ok($$ delete from public.story_views $$, '42501', null, 'anon cannot delete story views');
+
+-- Back to the test owner: the guard binds trusted writers too, and views go with their story.
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+select throws_ok($$ insert into public.story_views (story_id, viewer_profile_id)
+                    values ('07d00000-0000-4000-8000-000000000001', '07b00000-0000-4000-8000-000000000003') $$,
+  'PT422', 'story_view.not_a_story', 'a trusted writer cannot record a view of a non story (Req 12.4)');
+select throws_ok($$ update public.story_views set story_id = '07d00000-0000-4000-8000-000000000001'
+                    where viewer_profile_id = '07b00000-0000-4000-8000-000000000004' $$,
+  'PT422', 'story_view.not_a_story', 'a view cannot be moved onto a non story');
+delete from public.content_items where id = '07d00000-0000-4000-8000-000000000005';
+select is_empty($$ select 1 from public.story_views where story_id = '07d00000-0000-4000-8000-000000000005' $$,
+  'deleting a story deletes its views (Req 5.6)');
 
 select lives_ok($$ set constraints all immediate $$, 'everything left in the transaction passes the deferred checks');
 
