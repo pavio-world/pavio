@@ -1,11 +1,10 @@
 -- AI usage and the Last.fm link (Spec 00, Req 17, 18, 22.11, 25.1, 25.2, 25.13; D-4, DR-1, DR-2).
--- The AI part comes first (task 25). The Last.fm section (task 26) adds its own checks below and
--- raises the plan count.
+-- The AI part comes first (task 25); the Last.fm section (task 26) follows it.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(115);
+select plan(180);
 
 -- =============================================================================================
 -- AI usage (task 25; Req 17.1 to 17.9, 22.11, 25.13)
@@ -362,6 +361,200 @@ select is((select count(*)::int from public.ai_usage
   1, 'Eve''s row survives the profile deletion with a null acting profile');
 select is((select sum(cost_usd) from public.ai_usage where user_id = '13a00000-0000-4000-8000-000000000005'),
   0.05::numeric, 'her spend still counts after the profile is gone');
+
+-- =============================================================================================
+-- Last.fm link (task 26; Req 18.1 to 18.3, 22.1 to 22.5, 25.1, 25.2)
+-- Reuses the people above: Ann owns ai_ann and manages the business ai_shop, Ben owns ai_ben,
+-- Cat owns ai_cat, Dan owns ai_dan, Fay owns ai_fay. Eve's profile is already deleted.
+-- =============================================================================================
+set local role postgres;
+
+-- ---------------------------------------------------------------------------------------------
+-- Catalog: columns, foreign key, unique key, trigger, RLS, policies and grants (Req 18.1, 22.1 to 22.5).
+-- ---------------------------------------------------------------------------------------------
+select has_table('public', 'lastfm_links', 'lastfm_links exists');
+select columns_are('public', 'lastfm_links', array[
+  'id', 'profile_id', 'username', 'created_at', 'updated_at'
+], 'lastfm_links has exactly its five columns');
+select col_type_is('public', 'lastfm_links', 'username', 'text', 'username is text');
+select col_not_null('public', 'lastfm_links', 'profile_id', 'a link always belongs to a profile');
+select col_not_null('public', 'lastfm_links', 'username', 'a link always has a username');
+select is((select confrelid::regclass::text || ':' || confdeltype::text from pg_catalog.pg_constraint
+           where conrelid = 'public.lastfm_links'::regclass and contype = 'f'
+             and conkey = array[(select attnum from pg_catalog.pg_attribute
+                                 where attrelid = 'public.lastfm_links'::regclass and attname = 'profile_id')]::smallint[]),
+  'profiles:c', 'profile_id references profiles and cascades on delete');
+select col_is_unique('public', 'lastfm_links', 'profile_id', 'a profile has at most one link');
+select has_trigger('public', 'lastfm_links', 'lastfm_links_set_updated_at', 'lastfm_links keeps updated_at current');
+select ok((select relrowsecurity from pg_class where oid = 'public.lastfm_links'::regclass),
+  'RLS is enabled on lastfm_links');
+select policies_are('public', 'lastfm_links', array[
+  'lastfm_links_authenticated_select', 'lastfm_links_authenticated_insert',
+  'lastfm_links_authenticated_update', 'lastfm_links_authenticated_delete'
+], 'lastfm_links has exactly its four policies');
+select table_privs_are('public', 'lastfm_links', 'anon', array[]::text[], 'anon has no privilege on lastfm_links');
+select table_privs_are('public', 'lastfm_links', 'authenticated', array['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  'authenticated holds select, insert, update and delete on lastfm_links');
+
+-- ---------------------------------------------------------------------------------------------
+-- Username format: 2 to 15 characters of letters, digits, underscore and hyphen, starting with a
+-- letter (Req 18.1). Checked as the test owner, so only the check constraint can reject.
+-- ---------------------------------------------------------------------------------------------
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'a') $$,
+  '23514', null, 'one character is too short');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'abcdefghijklmnop') $$,
+  '23514', null, 'sixteen characters is too long');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', '') $$,
+  '23514', null, 'an empty username is rejected');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', '1abc') $$,
+  '23514', null, 'a username cannot start with a digit');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', '_abc') $$,
+  '23514', null, 'a username cannot start with an underscore');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'ab cd') $$,
+  '23514', null, 'a username cannot contain a space');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'ab.cd') $$,
+  '23514', null, 'a username cannot contain a dot');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', E'abc\n') $$,
+  '23514', null, 'a trailing newline is rejected');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'añbc') $$,
+  '23514', null, 'a non ASCII letter is rejected');
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000004', 'ab') $$,
+  'two characters, the shortest username, is accepted');
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000006', 'abcdefghijklmno') $$,
+  'fifteen characters, the longest username, is accepted');
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000003', 'A_b-9') $$,
+  'capitals, digits, underscore and hyphen are accepted');
+select is((select count(*)::int from public.lastfm_links
+           where profile_id in ('13b00000-0000-4000-8000-000000000003', '13b00000-0000-4000-8000-000000000004',
+                                '13b00000-0000-4000-8000-000000000006')),
+  3, 'the three valid links are stored');
+select is((select count(*)::int from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000002'),
+  0, 'the rejected usernames left no row for Ben');
+
+-- One link per profile (Req 18.1).
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000004', 'second') $$,
+  '23505', null, 'a second link for the same profile is rejected');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Ann: she writes and reads links for the profiles she acts as, and only those (Req 18.2, 18.3).
+-- ---------------------------------------------------------------------------------------------
+select set_config('request.jwt.claims',
+  json_build_object('sub', '13a00000-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ann claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '13a00000-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Ann');
+
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000001', 'ann_fm') $$,
+  'Ann links a Last.fm username to her own profile');
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000007', 'shop_fm') $$,
+  'Ann links a username to the business she manages');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000002', 'ann_for_ben') $$,
+  '42501', null, 'Ann cannot link a username to Ben''s profile');
+select is((select count(*)::int from public.lastfm_links), 2,
+  'Ann reads exactly the links of her two profiles');
+select is_empty($$ select 1 from public.lastfm_links
+                   where profile_id not in ('13b00000-0000-4000-8000-000000000001',
+                                            '13b00000-0000-4000-8000-000000000007') $$,
+  'Ann cannot read anyone else''s link');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000001', 'ann_again') $$,
+  '23505', null, 'Ann cannot add a second link to the same profile');
+select throws_ok($$ update public.lastfm_links set username = '1bad'
+                    where profile_id = '13b00000-0000-4000-8000-000000000001' $$,
+  '23514', null, 'an update to a badly formed username is rejected');
+select lives_ok($$ update public.lastfm_links set username = 'ann_fm2'
+                   where profile_id = '13b00000-0000-4000-8000-000000000001' $$,
+  'Ann changes the username on her own link');
+select is((select username from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000001'),
+  'ann_fm2', 'the new username is stored');
+select throws_ok($$ update public.lastfm_links set profile_id = '13b00000-0000-4000-8000-000000000002'
+                    where profile_id = '13b00000-0000-4000-8000-000000000001' $$,
+  '42501', null, 'Ann cannot move her link to a profile she does not act as');
+select lives_ok($$ update public.lastfm_links set username = 'hacked'
+                   where profile_id = '13b00000-0000-4000-8000-000000000004' $$,
+  'Ann''s update of Dan''s link runs but matches no row');
+select lives_ok($$ delete from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000004' $$,
+  'Ann''s delete of Dan''s link runs but matches no row');
+select lives_ok($$ delete from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000007' $$,
+  'Ann removes the business link');
+select is((select count(*)::int from public.lastfm_links), 1, 'Ann now reads one link');
+
+-- ---------------------------------------------------------------------------------------------
+-- As Ben: he sees nobody's link and cannot write to anyone else's profile.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '13a00000-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ben claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '13a00000-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Ben');
+
+select is_empty($$ select 1 from public.lastfm_links $$, 'Ben reads no link while he has none of his own');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000001', 'ben_for_ann') $$,
+  '42501', null, 'Ben cannot link a username to Ann''s profile');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000007', 'ben_for_shop') $$,
+  '42501', null, 'Ben cannot link a username to a business he does not manage');
+select lives_ok($$ update public.lastfm_links set username = 'hacked'
+                   where profile_id = '13b00000-0000-4000-8000-000000000001' $$,
+  'Ben''s update of Ann''s link runs but matches no row');
+select lives_ok($$ delete from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000001' $$,
+  'Ben''s delete of Ann''s link runs but matches no row');
+select lives_ok($$ insert into public.lastfm_links (profile_id, username)
+                   values ('13b00000-0000-4000-8000-000000000002', 'ben-fm') $$,
+  'Ben links a username to his own profile');
+select is((select count(*)::int from public.lastfm_links), 1, 'Ben reads only his own link');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed out visitor: no read and no write (Req 18.3, 22.5).
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+
+select throws_ok($$ select 1 from public.lastfm_links $$, '42501', null, 'anon cannot read lastfm_links');
+select throws_ok($$ insert into public.lastfm_links (profile_id, username)
+                    values ('13b00000-0000-4000-8000-000000000001', 'anon_fm') $$,
+  '42501', null, 'anon cannot insert into lastfm_links');
+select throws_ok($$ update public.lastfm_links set username = 'anon_fm' $$,
+  '42501', null, 'anon cannot update lastfm_links');
+select throws_ok($$ delete from public.lastfm_links $$, '42501', null, 'anon cannot delete from lastfm_links');
+
+-- ---------------------------------------------------------------------------------------------
+-- What is stored, as the test owner: the other logins changed nothing, and deleting a profile
+-- deletes its link.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select is((select username from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000001'),
+  'ann_fm2', 'Ben''s update and delete left Ann''s link as she set it');
+select is((select username from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000004'),
+  'ab', 'Ann''s update and delete left Dan''s link untouched');
+select is((select count(*)::int from public.lastfm_links), 5, 'Ann, Ben, Cat, Dan and Fay each hold one link');
+delete from public.profiles where id = '13b00000-0000-4000-8000-000000000006';
+select is((select count(*)::int from public.lastfm_links where profile_id = '13b00000-0000-4000-8000-000000000006'),
+  0, 'deleting a profile deletes its link');
 
 select * from finish();
 rollback;
