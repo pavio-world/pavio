@@ -7,7 +7,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(144);
+select plan(158);
 
 -- =============================================================================================
 -- Vouch RPCs, eligibility, rights and Top 8 (task 16)
@@ -571,8 +571,54 @@ set local role postgres;
 select set_config('request.jwt.claims', '', true);
 
 -- =============================================================================================
--- Search_Trust (task 22) is added below.
+-- Search_Trust (task 22.2; Req 14.22, 25.3; NQ-2, NQ-4)
+-- private.search_trust counts the public vouches about a profile that their authors feature in
+-- their Top 8. One vouch per author and subject, so the count is of distinct authors. A vouch
+-- the subject hid still counts. Unfeatured vouches and vouches that are not public do not.
+-- It reuses the fixtures above, as the test owner with no claims.
+-- Now: Ben has vouch 01 (Ada, public, featured at 1) and Cal's vouch (public, not featured).
+-- Cal has vouch 02 (Ada, circles, featured at 2, hidden). Ada has vouch 03 (Ben, public, not featured).
 -- =============================================================================================
+select ok(not has_function_privilege(r, 'private.search_trust(uuid)', 'execute'),
+  r || ' cannot execute private.search_trust')
+from unnest(array['public', 'anon', 'authenticated']) as r;
+select is(private.search_trust('08b00000-0000-4000-8000-000000000002'), 1,
+  'Ben has one featured public vouch, so Search_Trust is 1');
+select ok(exists (select 1 from public.vouches
+                  where author_profile_id = '08b00000-0000-4000-8000-000000000003'
+                    and subject_profile_id = '08b00000-0000-4000-8000-000000000002'
+                    and audience = 'public' and top8_position is null),
+  'Cal wrote Ben a public vouch he has not featured, so the count above ignored it (Req 14.22)');
+update public.vouches set top8_position = 1
+where author_profile_id = '08b00000-0000-4000-8000-000000000003'
+  and subject_profile_id = '08b00000-0000-4000-8000-000000000002';
+select is(private.search_trust('08b00000-0000-4000-8000-000000000002'), 2,
+  'once Cal features his vouch, Ben counts two distinct authors');
+update public.vouches set hidden_by_subject = true
+where subject_profile_id = '08b00000-0000-4000-8000-000000000002' and top8_position is not null;
+select is((select count(*)::int from public.vouches
+           where subject_profile_id = '08b00000-0000-4000-8000-000000000002' and hidden_by_subject), 2,
+  'Ben hid both vouches about him');
+select is(private.search_trust('08b00000-0000-4000-8000-000000000002'), 2,
+  'hidden vouches still count towards Search_Trust (NQ-4)');
+update public.vouches set top8_position = null where id = '08f00000-0000-4000-8000-000000000001';
+select is(private.search_trust('08b00000-0000-4000-8000-000000000002'), 1,
+  'an author who stops featuring her vouch no longer counts (Req 14.22)');
+select is(private.search_trust('08b00000-0000-4000-8000-000000000003'), 0,
+  'a featured vouch whose audience is circles does not count: Cal has Search_Trust 0');
+insert into public.vouches (author_profile_id, subject_profile_id, body, audience, top8_position)
+values ('08b00000-0000-4000-8000-000000000003', '08b00000-0000-4000-8000-000000000001',
+        'Ada hosts well', 'connections', 2);
+select is(private.search_trust('08b00000-0000-4000-8000-000000000001'), 0,
+  'a featured vouch whose audience is connections does not count, and Ada''s unfeatured vouch does not either');
+update public.vouches set top8_position = 1 where id = '08f00000-0000-4000-8000-000000000003';
+select is(private.search_trust('08b00000-0000-4000-8000-000000000001'), 1,
+  'featuring Ben''s public vouch gives Ada Search_Trust 1; the connections vouch still adds nothing');
+update public.vouches set audience = 'connections' where id = '08f00000-0000-4000-8000-000000000003';
+select is(private.search_trust('08b00000-0000-4000-8000-000000000001'), 0,
+  'a featured vouch that stops being public stops counting');
+select is(private.search_trust('08b00000-0000-4000-8000-0000000000ff'), 0,
+  'a profile with no vouches has Search_Trust 0');
 
 select * from finish();
 rollback;
