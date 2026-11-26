@@ -1,14 +1,13 @@
 -- Circles and circle members: tables, member label switch rules, membership eligibility, the all
 -- followers circle, cascades and access (Spec 00, Req 8.22, 9.1 to 9.10, 9.12 to 9.16, 9.18, 10.1,
 -- 10.2, 10.6 to 10.8, 22.8, 25.1, 25.2, 25.4; DR-1).
--- Item_Circle_Links (item_circles) arrive with content in migration 12, so the cascade of links on
--- circle delete (Req 9.18) and the private name checks across every surface (09_circle_privacy)
--- are tested there.
+-- The cascade of item links on circle delete (Req 9.18) is checked here now that migration 12
+-- created item_circles; the private name checks across every surface are in 09_circle_privacy.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(204);
+select plan(207);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims.
@@ -539,9 +538,26 @@ select ok(exists (select 1 from public.circles
 -- ---------------------------------------------------------------------------------------------
 -- Cascades (Req 9.18) and relationship removal (Req 8.22).
 -- ---------------------------------------------------------------------------------------------
+select is((select confdeltype::text from pg_catalog.pg_constraint
+           where conrelid = 'public.item_circles'::regclass and contype = 'f'
+             and conkey = array[(select attnum from pg_catalog.pg_attribute
+                                 where attrelid = 'public.item_circles'::regclass
+                                   and attname = 'circle_id')]::smallint[]),
+  'c', 'item_circles.circle_id cascades on delete');
+-- An item of Amy's shared to the circle about to be deleted. The deferred circles checks run only
+-- at commit, and this file rolls back; 07_content_can_view covers what the item looks like after.
+insert into public.content_items (id, owner_profile_id, content_type, audience, details) values
+  ('06d00000-0000-4000-8000-000000000001', '06b00000-0000-4000-8000-000000000001', 'status', 'circles',
+   '{"text": "circle only"}');
+insert into public.item_circles (content_item_id, circle_id) values
+  ('06d00000-0000-4000-8000-000000000001', '06c00000-0000-4000-8000-000000000003');
 delete from public.circles where id = '06c00000-0000-4000-8000-000000000003';
 select is_empty($$ select 1 from public.circle_members where circle_id = '06c00000-0000-4000-8000-000000000003' $$,
   'deleting a circle deletes its members (Req 9.18)');
+select is_empty($$ select 1 from public.item_circles where circle_id = '06c00000-0000-4000-8000-000000000003' $$,
+  'deleting a circle deletes its item links (Req 9.18)');
+select ok(exists (select 1 from public.content_items where id = '06d00000-0000-4000-8000-000000000001'),
+  'the linked item itself stays');
 
 -- Amy and Ben disconnect: Ben leaves Amy's circles and Amy leaves Ben's, Cal stays in Ben's.
 delete from public.relationships
