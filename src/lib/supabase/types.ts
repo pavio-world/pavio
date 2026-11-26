@@ -1230,6 +1230,7 @@ export type Database = {
           label: string
         }[]
       }
+      try_uuid: { Args: { p: string }; Returns: string }
       view_as: {
         Args: { p_owner_profile_id: string; p_simulated_viewer: string }
         Returns: {
