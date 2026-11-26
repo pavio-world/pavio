@@ -1,5 +1,6 @@
--- Schema foundation: required extensions, the private schema, the enum types and the lookup tables
--- (Spec 00, Req 1.6, 3.5, 3.8, 3.9, 3.10, 4.5, 4.7, 4.9, 8.1, 11.2, 11.3, 15.2, 17.2, 17.6,
+-- Schema foundation: required extensions, the private schema, the enum types, the lookup tables
+-- and the catalog-wide table, key, index, policy and privilege checks
+-- (Spec 00, Req 1.6, 3.5, 3.8, 3.9, 3.10, 3.11, 4.5, 4.7, 4.9, 8.1, 11.2, 11.3, 15.2, 17.2, 17.6,
 -- 22.1, 22.2, 22.3, 22.5, 25.1, 25.4, 25.5, 25.10, 25.11; D-4, D-8).
 begin;
 -- supabase test db logs in as cli_login_postgres, a NOINHERIT role with no usage on the
@@ -7,7 +8,7 @@ begin;
 set local role postgres;
 set local search_path = public, extensions;
 
-select plan(61);
+select plan(73);
 
 select has_extension('pg_trgm', 'pg_trgm is installed');
 select has_extension('extensions', 'pg_trgm', 'pg_trgm lives in the extensions schema');
@@ -101,6 +102,152 @@ select policy_cmd_is('public', 'languages', 'languages_anon_select', 'select', '
 select policy_cmd_is('public', 'languages', 'languages_authenticated_select', 'select', 'languages_authenticated_select is a select policy');
 select is((select count(*)::int from pg_policies where schemaname = 'public' and tablename in ('reserved_handles', 'app_settings')),
   0, 'reserved_handles and app_settings have no policies');
+
+-- ---------------------------------------------------------------------------------------------
+-- Catalog-wide checks (Spec 00 task 29; Req 3.5, 3.6, 3.8, 3.9, 3.11, 22.1, 22.2, 22.3, 22.5,
+-- 25.1, 25.5). Each is_empty query lists offenders, so a failure names the table or policy.
+-- ---------------------------------------------------------------------------------------------
+
+-- Pin the table set so a new table cannot appear without these checks being reviewed.
+select set_eq(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p') $$,
+  array['ai_usage', 'app_settings', 'business_details', 'circle_members', 'circles', 'content_items',
+        'conversation_members', 'conversations', 'group_members', 'groups', 'item_circles', 'languages',
+        'lastfm_links', 'message_translations', 'messages', 'notifications', 'profile_managers',
+        'profile_views', 'profiles', 'relationships', 'reserved_handles', 'search_appearance_marks',
+        'search_appearances', 'story_views', 'vouches'],
+  'the public schema holds exactly the 25 tables of the design'
+);
+
+-- RLS enabled on every table in public (Req 3.5, 22.1, 25.5).
+select is_empty(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p') and not c.relrowsecurity $$,
+  'RLS is enabled on every public table'
+);
+
+-- A single uuid primary key named id that defaults to gen_random_uuid() (Req 3.8).
+select is_empty(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and not exists (
+         select 1
+         from pg_catalog.pg_index i
+         join pg_catalog.pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
+         left join pg_catalog.pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+         where i.indrelid = c.oid and i.indisprimary and i.indnkeyatts = 1
+           and a.attname = 'id' and a.atttypid = 'uuid'::regtype
+           and pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'gen_random_uuid()') $$,
+  'every public table has a single uuid primary key id defaulting to gen_random_uuid()'
+);
+
+-- created_at timestamptz not null default now() on every table (Req 3.8).
+select is_empty(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and not exists (
+         select 1
+         from pg_catalog.pg_attribute a
+         join pg_catalog.pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+         where a.attrelid = c.oid and a.attname = 'created_at' and not a.attisdropped
+           and a.atttypid = 'timestamptz'::regtype and a.attnotnull
+           and pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'now()') $$,
+  'every public table has created_at timestamptz not null default now()'
+);
+
+-- updated_at is timestamptz not null default now() wherever it exists (Req 3.9).
+select is_empty(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attname = 'updated_at' and not a.attisdropped
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and not exists (
+         select 1 from pg_catalog.pg_attrdef d
+         where d.adrelid = a.attrelid and d.adnum = a.attnum
+           and a.atttypid = 'timestamptz'::regtype and a.attnotnull
+           and pg_catalog.pg_get_expr(d.adbin, d.adrelid) = 'now()') $$,
+  'every updated_at column is timestamptz not null default now()'
+);
+
+-- ... and a BEFORE UPDATE row trigger on private.set_updated_at() keeps it current (Req 3.9).
+-- tgtype bits: 1 = row level, 2 = before, 16 = update.
+select is_empty(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attname = 'updated_at' and not a.attisdropped
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and not exists (
+         select 1 from pg_catalog.pg_trigger t
+         where t.tgrelid = c.oid and not t.tgisinternal
+           and t.tgfoid = 'private.set_updated_at()'::regprocedure
+           and (t.tgtype & 1) = 1 and (t.tgtype & 2) = 2 and (t.tgtype & 16) = 16) $$,
+  'every table with updated_at has a before update row trigger calling private.set_updated_at'
+);
+
+-- The tables whose rows change carry updated_at: the set is pinned so an omission shows up here.
+select set_eq(
+  $$ select c.relname::text from pg_catalog.pg_class c
+     join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attname = 'updated_at' and not a.attisdropped
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p') $$,
+  array['ai_usage', 'app_settings', 'business_details', 'circles', 'content_items', 'conversations', 'groups',
+        'lastfm_links', 'messages', 'profile_managers', 'profiles', 'relationships', 'search_appearances',
+        'vouches'],
+  'updated_at exists on exactly the tables whose rows change'
+);
+
+-- Every foreign key column has a valid, non partial index that starts with it (Req 3.11).
+select isnt_empty(
+  $$ select 1 from pg_catalog.pg_constraint where contype = 'f' and connamespace = 'public'::regnamespace $$,
+  'the foreign key check below sees the public foreign keys'
+);
+select is_empty(
+  $$ select k.conrelid::regclass::text || '.' || k.conname
+     from pg_catalog.pg_constraint k
+     where k.contype = 'f' and k.connamespace = 'public'::regnamespace
+       and not exists (
+         select 1 from pg_catalog.pg_index i
+         where i.indrelid = k.conrelid and i.indisvalid and i.indpred is null
+           and (i.indkey::int2[])[0:cardinality(k.conkey) - 1] = k.conkey) $$,
+  'every foreign key has a leading index'
+);
+
+-- Policy names are <table>_<role>_<action>, for exactly one API role and one command (Req 22.2).
+select is_empty(
+  $$ select tablename || '.' || policyname from pg_catalog.pg_policies
+     where schemaname = 'public'
+       and not (cardinality(roles) = 1
+                and roles[1] in ('anon', 'authenticated')
+                and cmd in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+                and policyname = tablename || '_' || roles[1] || '_' || lower(cmd)) $$,
+  'every public policy is named <table>_<role>_<action> and targets one API role and one command'
+);
+
+-- anon holds no insert, update or delete privilege on any table, table level or column level
+-- (Req 22.5, 25.1).
+select is_empty(
+  $$ select c.relname::text || ':' || p
+     from pg_catalog.pg_class c
+     cross join unnest(array['INSERT', 'UPDATE', 'DELETE']) p
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and (has_table_privilege('anon', c.oid, p)
+            or (p <> 'DELETE' and has_any_column_privilege('anon', c.oid, p))) $$,
+  'anon holds no insert, update or delete privilege on any public table'
+);
+
+-- A privilege is granted to anon or authenticated only where a policy for that role and command
+-- exists, so no grant is left without a policy and no policy is missing for a grant (Req 22.2, 22.3).
+select is_empty(
+  $$ select c.relname::text || ':' || r || ':' || p
+     from pg_catalog.pg_class c
+     cross join unnest(array['anon', 'authenticated']) r
+     cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p
+     where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+       and (has_table_privilege(r, c.oid, p)
+            or (p <> 'DELETE' and has_any_column_privilege(r, c.oid, p)))
+       and not exists (
+         select 1 from pg_catalog.pg_policies pl
+         where pl.schemaname = 'public' and pl.tablename = c.relname and r = any (pl.roles) and pl.cmd = p) $$,
+  'every table privilege held by anon or authenticated has a matching policy'
+);
 
 select * from finish();
 rollback;
