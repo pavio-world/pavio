@@ -1,12 +1,14 @@
 -- Content items, vouches, item circle links and can_view: every can_view branch, the content and
 -- vouch guards, the deferred circles checks (D-7), the details and path kind checks (NQ-5 and the
--- fix_content_image_path_kind rule), RLS reads filtered by can_view and column silence (D-3).
--- Spec 00 Req 11.4 to 11.13, 11.15, 20.2 to 20.8, 20.10 to 20.13, 20.15, 25.1 to 25.4; D-3, D-7.
+-- fix_content_image_path_kind rule), RLS reads filtered by can_view and column silence (D-3),
+-- and the content RPCs create_content_item, set_item_audience and item_audience (task 16).
+-- Spec 00 Req 11.4 to 11.13, 11.15, 11.16, 20.2 to 20.8, 20.10 to 20.13, 20.15, 25.1 to 25.4;
+-- D-3, D-7.
 begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(254);
+select plan(287);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims (a trusted caller, so stories can be back-dated).
@@ -803,6 +805,133 @@ select ok(public.can_view(
             (select id from public.content_items where details ->> 'image_path' like '%/grandchild.jpg'),
             '07b00000-0000-4000-8000-000000000001'),
   'the owner sees the grandchild');
+
+-- ---------------------------------------------------------------------------------------------
+-- Content RPCs (task 16; Req 11.7, 11.16; D-3): create_content_item makes an item and its links
+-- in one call, set_item_audience replaces the links, item_audience answers only the owner.
+-- Ann's circles now: inner (Bo), work (nobody). Bo's circle: mates.
+-- ---------------------------------------------------------------------------------------------
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Ann claims (RPCs)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Ann');
+
+select lives_ok($$ do $d$ begin
+                     perform public.create_content_item(
+                       '07b00000-0000-4000-8000-000000000001', 'gallery',
+                       '{"image_path": "07b00000-0000-4000-8000-000000000001/gallery/rpc1.jpg"}',
+                       'circles', array['07c00000-0000-4000-8000-000000000001'::uuid]);
+                     set constraints all immediate;
+                     set constraints all deferred;
+                   end $d$ $$,
+  'create_content_item makes a circles item and its link in one call, passing the commit check');
+-- Keep the new id for the later sections (a transaction local setting, readable by every role).
+select set_config('pavio_test.rpc1',
+  (select id::text from public.content_items
+   where details ->> 'image_path' = '07b00000-0000-4000-8000-000000000001/gallery/rpc1.jpg'), true);
+select results_eq($$ select audience::text, circle_ids
+                     from public.item_audience(current_setting('pavio_test.rpc1')::uuid) $$,
+  $$ values ('circles'::text, array['07c00000-0000-4000-8000-000000000001'::uuid]) $$,
+  'item_audience shows the owner the audience and the linked circle');
+select throws_ok($$ select public.create_content_item(
+                      '07b00000-0000-4000-8000-000000000001', 'gallery',
+                      '{"image_path": "07b00000-0000-4000-8000-000000000001/gallery/rpc2.jpg"}',
+                      'circles', array['07c00000-0000-4000-8000-000000000001'::uuid,
+                                       '07c00000-0000-4000-8000-000000000004'::uuid]) $$,
+  'PT422', 'audience.circle_not_owned', 'create_content_item rejects a circle the owner does not own (Req 11.8)');
+select is_empty($$ select 1 from public.content_items
+                   where details ->> 'image_path' = '07b00000-0000-4000-8000-000000000001/gallery/rpc2.jpg' $$,
+  'the rejected call left no item behind, not even one linked to Ann''s own circle');
+select throws_ok($$ do $d$ begin
+                      perform public.create_content_item(
+                        '07b00000-0000-4000-8000-000000000001', 'gallery',
+                        '{"image_path": "07b00000-0000-4000-8000-000000000001/gallery/rpc3.jpg"}',
+                        'circles', null);
+                      set constraints all immediate;
+                    end $d$ $$,
+  'PT422', 'content.circles_required', 'create_content_item with circles and no circle fails at commit (Req 11.7)');
+set constraints all deferred;
+select throws_ok($$ select public.create_content_item('07b00000-0000-4000-8000-000000000002', 'writing',
+                                                      '{"title": "x", "body": "y"}') $$,
+  'PT403', 'acting.not_allowed', 'Ann cannot create an item for Bo through the RPC (Req 11.16)');
+select lives_ok($$ do $d$ begin
+                     perform public.set_item_audience(current_setting('pavio_test.rpc1')::uuid, 'circles',
+                                                      array['07c00000-0000-4000-8000-000000000002'::uuid]);
+                     set constraints all immediate;
+                     set constraints all deferred;
+                   end $d$ $$,
+  'set_item_audience replaces the links in one call, passing the last link check');
+select results_eq($$ select audience::text, circle_ids
+                     from public.item_audience(current_setting('pavio_test.rpc1')::uuid) $$,
+  $$ values ('circles'::text, array['07c00000-0000-4000-8000-000000000002'::uuid]) $$,
+  'the old link is gone and the new one is in place');
+select is((select count(*)::int from public.item_circles
+           where content_item_id = current_setting('pavio_test.rpc1')::uuid), 1,
+  'exactly one link remains');
+select lives_ok($$ do $d$ begin
+                     perform public.set_item_audience(current_setting('pavio_test.rpc1')::uuid, 'connections');
+                     set constraints all immediate;
+                     set constraints all deferred;
+                   end $d$ $$,
+  'set_item_audience can move an item off circles');
+select results_eq($$ select audience::text, circle_ids
+                     from public.item_audience(current_setting('pavio_test.rpc1')::uuid) $$,
+  $$ values ('connections'::text, '{}'::uuid[]) $$,
+  'moving off circles removes every link');
+select throws_ok($$ select public.set_item_audience('07d00000-0000-4000-8000-000000000001', 'connections') $$,
+  '23514', null, 'set_item_audience cannot move writing off public (Req 11.5)');
+select throws_ok($$ select public.set_item_audience('07d00000-0000-4000-8000-0000000000ff', 'public') $$,
+  'PT404', 'content.not_found', 'set_item_audience on a missing id is not found');
+select results_eq($$ select audience::text, circle_ids
+                     from public.item_audience('07f00000-0000-4000-8000-000000000001') $$,
+  $$ values ('circles'::text, array['07c00000-0000-4000-8000-000000000002'::uuid]) $$,
+  'item_audience also answers the author of a vouch');
+select is_empty($$ select * from public.item_audience('07d00000-0000-4000-8000-0000000000ff') $$,
+  'item_audience returns nothing for a missing id');
+
+-- Bo can see the item now (connections), but item_audience still tells him nothing (D-3).
+set local role postgres;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '07070707-0000-4000-8000-000000000002', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Bo claims (RPCs)');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), '07070707-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Bo');
+
+select ok(exists (select 1 from public.content_items where id = current_setting('pavio_test.rpc1')::uuid),
+  'Bo can read the item itself');
+select is_empty($$ select * from public.item_audience(current_setting('pavio_test.rpc1')::uuid) $$,
+  'item_audience returns nothing to a non-owner who can see the item');
+select is_empty($$ select * from public.item_audience('07f00000-0000-4000-8000-000000000001') $$,
+  'item_audience returns nothing to the subject of a circle vouch, so the circle stays silent');
+select throws_ok($$ select public.set_item_audience(current_setting('pavio_test.rpc1')::uuid, 'public') $$,
+  'PT404', 'content.not_found', 'a non-owner cannot change the audience, and learns nothing more');
+select throws_ok($$ select public.create_content_item('07b00000-0000-4000-8000-000000000001', 'status',
+                                                      '{"text": "hacked"}') $$,
+  'PT403', 'acting.not_allowed', 'Bo cannot create an item on Ann''s page through the RPC');
+
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims (RPCs)');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+
+select throws_ok($$ select * from public.item_audience('07d00000-0000-4000-8000-000000000001') $$,
+  '42501', null, 'anon cannot execute item_audience');
+select throws_ok($$ select public.create_content_item('07b00000-0000-4000-8000-000000000001', 'status',
+                                                      '{"text": "x"}') $$,
+  '42501', null, 'anon cannot execute create_content_item');
+select throws_ok($$ select public.set_item_audience('07d00000-0000-4000-8000-000000000001', 'public') $$,
+  '42501', null, 'anon cannot execute set_item_audience');
+
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+select is_empty($$ select 1 from public.item_circles
+                   where content_item_id = current_setting('pavio_test.rpc1')::uuid $$,
+  'no link of the RPC item is left behind');
 
 select lives_ok($$ set constraints all immediate $$, 'everything left in the transaction passes the deferred checks');
 
