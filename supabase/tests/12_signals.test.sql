@@ -6,7 +6,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(126);
+select plan(160);
 
 -- =============================================================================================
 -- Notifications table (task 10; Req 15.1, 15.2, 15.10 to 15.13)
@@ -438,6 +438,170 @@ select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_
 select throws_ok($$ insert into public.profile_views (viewed_profile_id, viewer_profile_id, viewed_on)
                     values ('b2b2b2b2-0000-4000-8000-000000000001', 'b2b2b2b2-0000-4000-8000-000000000001', current_date) $$,
   '23514', null, 'the table itself rejects a view of one''s own page (Req 16.3)');
+
+-- =============================================================================================
+-- Weekly search summary (task 23; Req 15.8, 15.9, 15.10, 16.10, 25.3)
+-- Reuses the fixtures above. The week is the seven Nairobi days before today: today - 7 to
+-- today - 1. Fixture appearances, by profile:
+--   Rita      today - 7: 2, today - 3: 1, today - 1: 3      -> 6 inside the week
+--   Otto      today - 2: 4, today: 5, today - 8: 7          -> 4 inside, the rest outside
+--   Mark      today: 9, today - 8: 2                        -> none inside the week
+--   mark_shop today - 2: 0                                  -> a zero total
+-- =============================================================================================
+
+-- ---------------------------------------------------------------------------------------------
+-- Catalog: the unique index, the function and who may execute it (Req 15.9, 22.3).
+-- ---------------------------------------------------------------------------------------------
+select ok(exists (select 1 from pg_catalog.pg_index i
+                  join pg_catalog.pg_class c on c.oid = i.indexrelid
+                  where i.indrelid = 'public.notifications'::regclass
+                    and c.relname = 'notifications_weekly_uq'
+                    and i.indisunique and i.indpred is not null),
+  'notifications_weekly_uq is a partial unique index on notifications');
+select has_function('private', 'send_weekly_search_summaries', array[]::text[],
+  'private.send_weekly_search_summaries exists');
+select function_returns('private', 'send_weekly_search_summaries', array[]::text[], 'integer',
+  'the summary function returns the number of notifications created');
+select is_definer('private', 'send_weekly_search_summaries', array[]::text[],
+  'the summary function is security definer');
+select ok(exists (select 1 from pg_catalog.unnest((select proconfig from pg_catalog.pg_proc
+                    where oid = 'private.send_weekly_search_summaries()'::regprocedure)) c
+                  where c = 'search_path=""'),
+  'the summary function sets an empty search_path');
+select ok(not has_function_privilege(r, 'private.send_weekly_search_summaries()', 'execute'),
+  r || ' cannot execute the summary function')
+from unnest(array['public', 'anon', 'authenticated']) as r;
+
+-- ---------------------------------------------------------------------------------------------
+-- Fixtures and the first run, as the test owner with no claims.
+-- ---------------------------------------------------------------------------------------------
+insert into public.search_appearances (profile_id, appeared_on, count) values
+  ('b2b2b2b2-0000-4000-8000-000000000001', (now() at time zone 'Africa/Nairobi')::date - 7, 2),
+  ('b2b2b2b2-0000-4000-8000-000000000001', (now() at time zone 'Africa/Nairobi')::date - 3, 1),
+  ('b2b2b2b2-0000-4000-8000-000000000001', (now() at time zone 'Africa/Nairobi')::date - 1, 3),
+  ('b2b2b2b2-0000-4000-8000-000000000002', (now() at time zone 'Africa/Nairobi')::date - 2, 4),
+  ('b2b2b2b2-0000-4000-8000-000000000002', (now() at time zone 'Africa/Nairobi')::date, 5),
+  ('b2b2b2b2-0000-4000-8000-000000000002', (now() at time zone 'Africa/Nairobi')::date - 8, 7),
+  ('b2b2b2b2-0000-4000-8000-000000000003', (now() at time zone 'Africa/Nairobi')::date, 9),
+  ('b2b2b2b2-0000-4000-8000-000000000003', (now() at time zone 'Africa/Nairobi')::date - 8, 2),
+  ('b2b2b2b2-0000-4000-8000-000000000004', (now() at time zone 'Africa/Nairobi')::date - 2, 0);
+
+create temp table weekly_run (created integer);
+insert into weekly_run select private.send_weekly_search_summaries();
+
+select is((select data from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+             and type = 'weekly_search_appearances' and data ? 'week_start'),
+  jsonb_build_object('count', 6,
+                     'week_start', (now() at time zone 'Africa/Nairobi')::date - 7,
+                     'week_end', (now() at time zone 'Africa/Nairobi')::date - 1),
+  'Rita gets one summary: her six appearances inside the seven Nairobi days, with the two dates (Req 15.8)');
+select is((select data from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000002'
+             and type = 'weekly_search_appearances' and data ? 'week_start'),
+  jsonb_build_object('count', 4,
+                     'week_start', (now() at time zone 'Africa/Nairobi')::date - 7,
+                     'week_end', (now() at time zone 'Africa/Nairobi')::date - 1),
+  'Otto gets one summary that leaves out today and the day before the week');
+select is((select count(*)::int from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000003'
+             and type = 'weekly_search_appearances'),
+  0, 'Mark has appearances only outside the week and gets no summary');
+select is((select count(*)::int from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000004'
+             and type = 'weekly_search_appearances'),
+  0, 'mark_shop has a zero total and gets no summary (Req 15.8)');
+select is((select created from weekly_run),
+  (select count(*)::int from public.notifications
+   where type = 'weekly_search_appearances'
+     and data ->> 'week_start' = ((now() at time zone 'Africa/Nairobi')::date - 7)::text),
+  'the function returns the number of summaries it created');
+select is_empty($$ select 1 from public.notifications n, jsonb_object_keys(n.data) as k
+                   where n.type = 'weekly_search_appearances' and n.data ? 'week_start'
+                     and k not in ('count', 'week_start', 'week_end') $$,
+  'a summary holds only the count and the two dates (Req 15.10)');
+select is_empty($$ select 1 from public.notifications
+                   where type = 'weekly_search_appearances' and data ? 'week_start'
+                     and (actor_profile_id is not null or reference_id is not null) $$,
+  'a summary names no actor and points at nothing');
+
+-- ---------------------------------------------------------------------------------------------
+-- A re-run in the same week adds nothing (Req 15.9), even after the numbers change.
+-- ---------------------------------------------------------------------------------------------
+select is(private.send_weekly_search_summaries(), 0, 'a second run in the same week creates nothing');
+select is((select count(*)::int from public.notifications
+           where recipient_profile_id in ('b2b2b2b2-0000-4000-8000-000000000001',
+                                          'b2b2b2b2-0000-4000-8000-000000000002')
+             and type = 'weekly_search_appearances' and data ? 'week_start'),
+  2, 'Rita and Otto still have one summary each');
+update public.search_appearances set count = count + 5
+where profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+  and appeared_on = (now() at time zone 'Africa/Nairobi')::date - 1;
+select is(private.send_weekly_search_summaries(), 0, 'a third run after the numbers changed still creates nothing');
+select is((select (data ->> 'count')::int from public.notifications
+           where recipient_profile_id = 'b2b2b2b2-0000-4000-8000-000000000001'
+             and type = 'weekly_search_appearances' and data ? 'week_start'),
+  6, 'Rita''s sent summary is not rewritten');
+
+-- The index is per recipient and week: another week is allowed, the same week is not.
+select lives_ok($$ select private.notify('b2b2b2b2-0000-4000-8000-000000000001', 'weekly_search_appearances',
+                     null, null, jsonb_build_object('count', 1,
+                       'week_start', (now() at time zone 'Africa/Nairobi')::date - 14,
+                       'week_end', (now() at time zone 'Africa/Nairobi')::date - 8)) $$,
+  'a summary for a different week is accepted');
+select throws_ok($$ select private.notify('b2b2b2b2-0000-4000-8000-000000000001', 'weekly_search_appearances',
+                      null, null, jsonb_build_object('count', 1,
+                        'week_start', (now() at time zone 'Africa/Nairobi')::date - 14,
+                        'week_end', (now() at time zone 'Africa/Nairobi')::date - 8)) $$,
+  '23505', null, 'the table itself rejects a second summary for the same recipient and week');
+
+-- ---------------------------------------------------------------------------------------------
+-- The schedule (Req 15.8): Monday 05:00 UTC, which is 08:00 in Nairobi.
+-- ---------------------------------------------------------------------------------------------
+select is((select count(*)::int from cron.job where jobname = 'pavio-weekly-search-summary'),
+  1, 'exactly one pavio-weekly-search-summary job exists');
+select is((select schedule from cron.job where jobname = 'pavio-weekly-search-summary'),
+  '0 5 * * 1', 'the job runs on Mondays at 05:00 UTC');
+select is((select command from cron.job where jobname = 'pavio-weekly-search-summary'),
+  'select private.send_weekly_search_summaries()', 'the job calls the summary function');
+select ok((select active from cron.job where jobname = 'pavio-weekly-search-summary'),
+  'the job is active');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed in as Rita, in the canary order (DR-1): she reads her own summary, cannot run the
+-- function and cannot read Otto's summary.
+-- ---------------------------------------------------------------------------------------------
+select set_config('request.jwt.claims',
+  json_build_object('sub', 'a1a1a1a1-0000-4000-8000-000000000001', 'role', 'authenticated')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the Rita claims');
+set local role authenticated;
+select is(current_user::text, 'authenticated', 'running as authenticated');
+select is(auth.uid(), 'a1a1a1a1-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Rita');
+
+select is((select data from public.notifications
+           where type = 'weekly_search_appearances'
+             and data ->> 'week_start' = ((now() at time zone 'Africa/Nairobi')::date - 7)::text),
+  jsonb_build_object('count', 6,
+                     'week_start', (now() at time zone 'Africa/Nairobi')::date - 7,
+                     'week_end', (now() at time zone 'Africa/Nairobi')::date - 1),
+  'Rita reads her own summary and no other (Req 15.12)');
+select throws_ok($$ select private.send_weekly_search_summaries() $$,
+  '42501', null, 'authenticated cannot execute the summary function');
+
+-- ---------------------------------------------------------------------------------------------
+-- Signed out visitor: no execute.
+-- ---------------------------------------------------------------------------------------------
+set local role postgres;
+select set_config('request.jwt.claims', json_build_object('sub', null, 'role', 'anon')::text, true);
+select ok(private.is_api_caller(), 'is_api_caller is true for the anon claims');
+set local role anon;
+select is(current_user::text, 'anon', 'running as anon');
+select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
+select throws_ok($$ select private.send_weekly_search_summaries() $$,
+  '42501', null, 'anon cannot execute the summary function');
+
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
 
 select * from finish();
 rollback;
