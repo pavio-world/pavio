@@ -2,7 +2,7 @@
 -- A circle member, a connection outside the circle and anon read every surface granted to them
 -- (circles, circle_members, item_circles, groups, notifications, content_items, vouches,
 -- can_view, page_items, story_label, relationship_counts, my_relationships, my_received_vouches,
--- item_audience, group_linked_circle), and the owner previews the page through view_as. Every
+-- item_audience, group_linked_circle, search_directory), and the owner previews the page through view_as. Every
 -- returned row is swept with row_to_json(...)::text for the private names and circle ids. The
 -- member label may appear only to members, and only through story_label, page_items and view_as;
 -- a switched off label never appears. A member cannot learn who else is in the circle.
@@ -11,7 +11,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(165);
+select plan(197);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims.
@@ -145,6 +145,13 @@ insert into cp_expect values
   ('Amy as Eve', 'view_as', true, 'some'),
   ('Amy as Cal', 'view_as', false, 'some'),
   ('Amy as signed out', 'view_as', false, 'some');
+-- search_directory returns public data only (Req 24.5). Three searches per caller: the exact private
+-- name of c01, the exact member label of c01, and a control ("amy") that proves the sweep is not
+-- vacuous because it does return Amy's public profile row.
+insert into cp_expect
+select c.caller, s.surface, false, case when s.surface = 'search_control' then 'some' else 'any' end
+from (values ('Amy'), ('Ben'), ('Cal'), ('anon')) as c(caller)
+cross join (values ('search_private_name'), ('search_member_label'), ('search_control')) as s(surface);
 grant select on cp_needles, cp_items, cp_people to anon, authenticated;
 grant insert on cp_rows to anon, authenticated;
 
@@ -169,6 +176,14 @@ select lives_ok(
                   ('signed out', null::uuid)) as v(vname, viewer)
      cross join lateral public.view_as('09b00000-0000-4000-8000-000000000001', v.viewer) x $$,
   'Amy''s circles and her view_as previews are captured');
+select lives_ok(
+  $$ insert into cp_rows
+     select 'Amy', q.surface, pg_catalog.row_to_json(x)::text
+     from (values ('search_private_name', 'zqx_hush_private_0901'),
+                  ('search_member_label', 'Warm lantern 0911'),
+                  ('search_control', 'amy')) as q(surface, term)
+     cross join lateral public.search_directory(q.term, null, null, 20, 0, '09b00000-0000-4000-8000-000000000001'::uuid) x $$,
+  'Amy searches the directory for a private name, a member label and a control');
 
 -- ---------------------------------------------------------------------------------------------
 -- Signed in as Ben, a member of both circles.
@@ -230,6 +245,14 @@ select lives_ok(
             pg_catalog.json_build_object('circle', public.group_linked_circle('09e00000-0000-4000-8000-000000000001'))::text
      from me $$,
   'every surface Ben can read is captured');
+select lives_ok(
+  $$ insert into cp_rows
+     select 'Ben', q.surface, pg_catalog.row_to_json(x)::text
+     from (values ('search_private_name', 'zqx_hush_private_0901'),
+                  ('search_member_label', 'Warm lantern 0911'),
+                  ('search_control', 'amy')) as q(surface, term)
+     cross join lateral public.search_directory(q.term, null, null, 20, 0, '09b00000-0000-4000-8000-000000000002'::uuid) x $$,
+  'Ben searches the directory for a private name, a member label and a control');
 
 -- Writes that return rows reach no circle (Req 9.10, 22.8).
 select is_empty(
@@ -324,6 +347,14 @@ select lives_ok(
             pg_catalog.json_build_object('circle', public.group_linked_circle('09e00000-0000-4000-8000-000000000001'))::text
      from me $$,
   'every surface Cal can read is captured');
+select lives_ok(
+  $$ insert into cp_rows
+     select 'Cal', q.surface, pg_catalog.row_to_json(x)::text
+     from (values ('search_private_name', 'zqx_hush_private_0901'),
+                  ('search_member_label', 'Warm lantern 0911'),
+                  ('search_control', 'amy')) as q(surface, term)
+     cross join lateral public.search_directory(q.term, null, null, 20, 0, '09b00000-0000-4000-8000-000000000004'::uuid) x $$,
+  'Cal searches the directory for a private name, a member label and a control');
 select throws_ok($$ insert into public.circle_members (circle_id, member_profile_id)
                     values ('09c00000-0000-4000-8000-000000000001', '09b00000-0000-4000-8000-000000000004') $$,
   '42501', null, 'Cal adding himself to Amy''s circle gives the same refusal as a member gets');
@@ -364,6 +395,14 @@ select lives_ok(
      select 'anon', 'relationship_counts', pg_catalog.row_to_json(x)::text
      from cp_people p cross join lateral public.relationship_counts(p.id) x $$,
   'every surface anon can read is captured');
+select lives_ok(
+  $$ insert into cp_rows
+     select 'anon', q.surface, pg_catalog.row_to_json(x)::text
+     from (values ('search_private_name', 'zqx_hush_private_0901'),
+                  ('search_member_label', 'Warm lantern 0911'),
+                  ('search_control', 'amy')) as q(surface, term)
+     cross join lateral public.search_directory(q.term, null, null, 20, 0, null) x $$,
+  'anon searches the directory for a private name, a member label and a control');
 select throws_ok(pg_catalog.format('select * from public.%I', t), '42501', null,
   'anon cannot read ' || t)
 from unnest(array['circles', 'circle_members', 'item_circles', 'groups', 'notifications']) as t;
@@ -377,8 +416,8 @@ select throws_ok($$ select public.group_linked_circle('09e00000-0000-4000-8000-0
   '42501', null, 'anon cannot execute group_linked_circle');
 
 -- ---------------------------------------------------------------------------------------------
--- Search (search_directory) is added in task 22.3. Its sweep for anon, the member and the
--- non-member goes here, using the same cp_needles and cp_expect rows.
+-- Search: search_directory is captured above for Amy, Ben, Cal and anon, and swept below with the
+-- same needles. Amy is the owner and also gets no private name or label from public search.
 -- ---------------------------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------------------------
