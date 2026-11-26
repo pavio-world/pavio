@@ -200,6 +200,158 @@ export function expectedConnectionsView(
   if (item.expired) return false;
   return item.nested ? undefined : true;
 }
+
+/** One item stored with audience `circles`, with the circles it is linked to. */
+interface CircleItem {
+  id: string;
+  kind: "content" | "vouch";
+  ownerId: string;
+  subjectId: string | null;
+  expired: boolean;
+  nested: boolean;
+  /** Linked circles that are hand picked (rows of `circle_members`). */
+  circleIds: string[];
+  /** True when the item is also linked to the owner's all followers circle. */
+  allFollowers: boolean;
+}
+
+/** All items stored with audience `circles`, generated ones and the all followers ones added by the test. */
+export function circleItems(fixture: Fixture, allFollowersItems: string[] = []): CircleItem[] {
+  const content = fixture.content
+    .filter((c) => c.audience === "circles")
+    .map(
+      (c): CircleItem => ({
+        id: c.id,
+        kind: "content",
+        ownerId: c.ownerId,
+        subjectId: null,
+        expired: c.expired,
+        nested: c.spec.parentPick !== null,
+        circleIds: c.circleIds,
+        allFollowers: false,
+      }),
+    );
+  const vouches = fixture.vouches
+    .filter((v) => v.audience === "circles")
+    .map(
+      (v): CircleItem => ({
+        id: v.id,
+        kind: "vouch",
+        ownerId: v.authorId,
+        subjectId: v.subjectId,
+        expired: false,
+        nested: false,
+        circleIds: v.circleIds,
+        allFollowers: false,
+      }),
+    );
+  // The extra items are one status per business, linked to its all followers circle.
+  const extra = allFollowersItems.map(
+    (id, i): CircleItem => ({
+      id,
+      kind: "content",
+      ownerId: fixture.businesses[i]!.id,
+      subjectId: null,
+      expired: false,
+      nested: false,
+      circleIds: [],
+      allFollowers: true,
+    }),
+  );
+  return [...content, ...vouches, ...extra];
+}
+
+/** True when `viewerId` is in at least one circle linked to `item`; deleted circles no longer count. */
+export function inLinkedCircle(
+  fixture: Fixture,
+  viewerId: string,
+  item: CircleItem,
+  deleted: ReadonlySet<string>,
+): boolean {
+  const member = item.circleIds.some(
+    (circleId) =>
+      !deleted.has(circleId) &&
+      fixture.memberships.some((m) => m.circleId === circleId && m.memberId === viewerId),
+  );
+  if (member) return true;
+  return (
+    item.allFollowers &&
+    fixture.relationships.some(
+      (r) =>
+        r.type === "follow" &&
+        r.status === "accepted" &&
+        r.requesterId === viewerId &&
+        r.targetId === item.ownerId,
+    )
+  );
+}
+
+/**
+ * What `can_view` must answer for a `circles` item: true, false, or undefined
+ * when the model cannot tell (a nested item also depends on its parent).
+ */
+export function expectedCircleView(
+  fixture: Fixture,
+  viewerId: string | null,
+  item: CircleItem,
+  deleted: ReadonlySet<string>,
+): boolean | undefined {
+  if (viewerId === null) return false;
+  if (viewerId === item.ownerId || viewerId === item.subjectId) return true;
+  if (!inLinkedCircle(fixture, viewerId, item, deleted)) return false;
+  if (item.expired) return false;
+  return item.nested ? undefined : true;
+}
+
+/** Checks can_view and RLS reads of `items` for the current caller against the model. */
+async function checkCircleItems(
+  client: Client,
+  fixture: Fixture,
+  user: SimUser,
+  items: CircleItem[],
+  deleted: ReadonlySet<string>,
+  phase: string,
+): Promise<void> {
+  const viewers: (string | null)[] = [null, ...user.controlled.map((p) => p.id)];
+  await asUser(client, user.role, user.sub);
+  try {
+    for (const viewer of viewers) {
+      const res = await client.query<{ id: string; ok: boolean }>(
+        "select t.id, public.can_view(t.id, $1) as ok from unnest($2::uuid[]) as t(id)",
+        [viewer, items.map((i) => i.id)],
+      );
+      const answers = new Map(res.rows.map((r) => [r.id, r.ok]));
+      for (const item of items) {
+        const expected = expectedCircleView(fixture, viewer, item, deleted);
+        if (expected !== undefined && answers.get(item.id) !== expected) {
+          throw new Error(
+            `${phase}: can_view(${item.kind} ${item.id}) as ${String(viewer)}: got ${String(answers.get(item.id))}, expected ${String(expected)}`,
+          );
+        }
+      }
+    }
+    for (const [table, kind] of [
+      ["content_items", "content"],
+      ["vouches", "vouch"],
+    ] as const) {
+      const res = await client.query<{ id: string }>(`select id from public.${table}`);
+      const seen = new Set(res.rows.map((r) => r.id));
+      for (const item of items.filter((i) => i.kind === kind)) {
+        const answers = viewers.map((v) => expectedCircleView(fixture, v, item, deleted));
+        const expected = answers.includes(true) ? true : answers.includes(undefined) ? undefined : false;
+        if (expected === undefined) continue;
+        if (seen.has(item.id) !== expected) {
+          throw new Error(
+            `${phase}: select from ${table}: ${item.id} seen=${String(seen.has(item.id))}, expected ${String(expected)} for ${user.role} ${user.sub ?? "(signed out)"}`,
+          );
+        }
+      }
+    }
+  } finally {
+    await resetRole(client);
+  }
+}
+
 /** Throws when `leaked` is not empty, naming what leaked and to whom. */
 function assertNoLeak(what: string, user: SimUser, leaked: string[]): void {
   if (leaked.length > 0) {
@@ -373,6 +525,55 @@ describe("visibility properties", () => {
         }),
         // endOnFailure: a world takes 10 to 30 s over the pooler, so shrinking could not finish
         // inside PROPERTY_TIMEOUT_MS and a failure would show up only as a timeout.
+        { numRuns: PROPERTY_RUNS, endOnFailure: true },
+      );
+    },
+    PROPERTY_TIMEOUT_MS,
+  );
+
+  // Feature: 00-database-foundation, Property 3: A circle item is visible to exactly the owner and members of a linked circle
+  // **Validates: Requirements 20.7, 20.2, 14.12, 10.3**
+  it(
+    "Property 3: a circle item is visible to exactly the owner and members of a linked circle",
+    async () => {
+      await fc.assert(
+        fc.asyncProperty(scenarioArb, viewerArb, fc.nat(1000), async (spec, viewerSpec, deletePick) => {
+          await withRolledBackTx(async (client) => {
+            const fixture = await insertScenario(client, spec);
+            // One status per business, shared to its all followers circle.
+            const extraIds: string[] = [];
+            for (const business of fixture.businesses) {
+              const circle = await client.query<{ id: string }>(
+                "select id from public.circles where owner_profile_id = $1 and is_all_followers",
+                [business.id],
+              );
+              const item = await client.query<{ id: string }>(
+                `insert into public.content_items (owner_profile_id, content_type, audience, details)
+                 values ($1, 'status', 'circles', '{"text":"hello"}'::jsonb) returning id`,
+                [business.id],
+              );
+              await client.query(
+                "insert into public.item_circles (content_item_id, circle_id) values ($1, $2)",
+                [item.rows[0]!.id, circle.rows[0]!.id],
+              );
+              extraIds.push(item.rows[0]!.id);
+            }
+            const items = circleItems(fixture, extraIds);
+            if (items.length === 0) return;
+            const user = simulatedUser(fixture, viewerSpec);
+
+            await checkCircleItems(client, fixture, user, items, new Set(), "before delete");
+
+            // Delete one hand picked circle: its links go with it, and an item left with
+            // no live circle is visible to its owner (and vouch subject) only.
+            const target = pick(fixture.circles, deletePick);
+            if (target !== undefined) {
+              await client.query("delete from public.circles where id = $1", [target.id]);
+              await checkCircleItems(client, fixture, user, items, new Set([target.id]), "after delete");
+            }
+          });
+        }),
+        // endOnFailure: see Property 2.
         { numRuns: PROPERTY_RUNS, endOnFailure: true },
       );
     },
