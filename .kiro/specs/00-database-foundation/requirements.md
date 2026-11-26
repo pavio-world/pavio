@@ -322,7 +322,7 @@ Dominic's answers to both rounds of open questions (OQ and NQ) are recorded in *
 9. IF a Content_Item has Audience `group` and no Group, THEN THE Database SHALL reject the write.
 10. WHEN a Content_Item of type `story` is created, THE Database SHALL set `expires_at` to 24 hours after `created_at`.
 11. IF a write sets a parent Content_Item owned by a different Owner, THEN THE Database SHALL reject the write.
-12. THE Database SHALL validate the `details` of each Content_Type against a minimal required shape (for example `writing` requires a title and body, `gallery` requires an image path, `status` requires text of 1 to 100 characters).
+12. THE Database SHALL validate the `details` of each Content_Type against a minimal required shape (for example `writing` requires a title and body, `gallery` requires an image path, `status` requires text of 1 to 100 characters), and SHALL accept an image path only on `gallery` and `story` items, pointing at the Owner's folder of the matching kind (Decision NQ-5).
 13. THE Database SHALL allow at most one current Status per Owner, so that a new Status replaces the previous Status.
 14. WHEN a Status is set, THE Database SHALL keep the Status until the Owner changes or deletes the Status, with no automatic expiry.
 15. THE RLS policy for reading `content_items` SHALL use can_view and no other visibility logic.

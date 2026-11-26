@@ -1111,6 +1111,8 @@ Content details shapes (`private.content_details_valid`):
 | `story` | `image_path` string whose second path part is `story` (`private-media`), or `text` string 1..280 (at least one) | `background` string |
 | any other value | `details` is a JSON object | |
 
+`image_path` is allowed only on `gallery` and `story` items and must be a three part NQ-5 path `<owner_profile_id>/<kind>/<file>` whose kind equals the item type; `writing`, `status` and any later type are rejected if they carry one, so a public item can never point at a private media file (migration `fix_content_image_path_kind`).
+
 Indexes: UQ partial `content_items_one_status_uq on (owner_profile_id) where content_type = 'status'` (Req 11.13); IX `(owner_profile_id, content_type, created_at desc)`; IX `parent_id`; IX `group_id`; IX partial `(expires_at) where expires_at is not null`; IX `((details ->> 'image_path'))` for storage reads.
 
 Grants: SELECT for A and U on `id, owner_profile_id, content_type, details, expires_at, parent_id, group_id, created_at, updated_at` (no `audience`); INSERT for U on `owner_profile_id, content_type, audience, details, parent_id, group_id`; UPDATE for U on `audience, details, parent_id`; DELETE for U.
@@ -1547,14 +1549,14 @@ The codes use the `PT` prefix because PostgREST turns a SQLSTATE of the form `PT
 | `PT403` | caller may not act as / not the owner | 403 | `acting.not_allowed`, `view_as.not_owner`, `vouch.author_only`, `vouch.subject_only`, `manager.owner_only`, `relationship.only_target_responds` |
 | `PT404` | target row not found or not visible to caller | 404 | `relationship.not_found`, `content.not_found`, `manager.person_not_found` |
 | `PT409` | duplicate that the caller should treat as already done | 409 | `relationship.exists` |
-| `PT422` | input or state rejected by a rule | 422 | `profile.handle_reserved`, `relationship.business_to_person`, `relationship.self`, `relationship.managed_page`, `circle.member_not_connected`, `content.circles_required` (raised by `content_items_circles_present`, `vouches_circles_present` and `item_circles_last_link`, D-7), `audience.circle_not_owned`, `vouch.self`, `vouch.not_eligible`, `vouch.top8_full`, `vouch.top8_duplicate`, `profile.last_owner`, `ai.bad_cost`, `search.bad_page` |
+| `PT422` | input or state rejected by a rule | 422 | `profile.handle_reserved`, `relationship.business_to_person`, `relationship.self`, `relationship.managed_page`, `circle.member_not_connected`, `circle.label_required`, `content.parent_cycle` (a parent chain that would loop back to the item), `content.circles_required` (raised by `content_items_circles_present`, `vouches_circles_present` and `item_circles_last_link`, D-7), `audience.circle_not_owned`, `vouch.self`, `vouch.not_eligible`, `vouch.top8_full`, `vouch.top8_duplicate`, `profile.last_owner`, `ai.bad_cost`, `search.bad_page` |
 | `PT429` | AI limit or spend cap reached | 429 | `ai.limit_reached` |
 
 Rules:
 
 - A declined connection that blocks a re-request raises `PT409 relationship.exists`, the same code a pending duplicate raises, so the requester cannot tell a decline from a still-pending request (Req 8.16, 8.19).
 - Errors from deferred constraint triggers (`content.circles_required`) are raised at commit; through PostgREST each request is its own transaction, so the RPC call that caused it fails with 422 and nothing is written.
-- Check-constraint and foreign-key violations surface as Postgres `23xxx` codes; the app maps them to generic messages. Guards convert the cases that need a specific message before the constraint is reached. A handle with capitals fails the format check and is not rewritten (D-6).
+- Check-constraint and foreign-key violations surface as Postgres `23xxx` codes; the app maps them to generic messages. This includes a bad `details` shape or a wrong-kind `image_path`, which fail `content_items_details_valid` with `23514` and have no `PT422` key. Guards convert the cases that need a specific message before the constraint is reached. A handle with capitals fails the format check and is not rewritten (D-6).
 - `can_view` and the read functions never raise on a missing or invisible item; they return false or no rows, so probing an id reveals nothing (Req 20.12).
 - Spec 01 adds a thin error map in `src/lib/supabase/errors.ts` that turns a `PTxxx` code into a `t()` key; this spec only fixes the codes and keys.
 
