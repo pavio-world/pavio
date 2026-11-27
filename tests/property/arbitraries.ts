@@ -945,6 +945,11 @@ export async function insertScenario(client: Client, spec: ScenarioSpec): Promis
       groupId: stored.groupId,
       expired: isExpiredStory(item),
     });
+    // A new status replaces the owner's previous one, and items nested under it cascade.
+    if (item.details.kind === "status") {
+      const kept = await existingContent(client, content);
+      content.splice(0, content.length, ...kept);
+    }
   }
 
   const vouches: FixtureVouch[] = [];
@@ -1011,6 +1016,24 @@ export async function insertScenario(client: Client, spec: ScenarioSpec): Promis
     vouches,
     rejected,
   };
+}
+
+/**
+ * Returns the content rows the database still holds. Inserting a status
+ * deletes the owner's previous status (Req 11.13) and, through the parent
+ * foreign key, every item nested under it, so a fixture must drop them.
+ */
+export async function existingContent(
+  client: Client,
+  content: readonly FixtureContent[],
+): Promise<FixtureContent[]> {
+  if (content.length === 0) return [];
+  const res = await client.query<{ id: string }>(
+    "select id from public.content_items where id = any($1::uuid[])",
+    [content.map((c) => c.id)],
+  );
+  const ids = new Set(res.rows.map((r) => r.id));
+  return content.filter((c) => ids.has(c.id));
 }
 
 /** Maps a relationship shape to concrete requester and target profiles. */

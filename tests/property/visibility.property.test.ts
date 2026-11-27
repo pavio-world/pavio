@@ -11,6 +11,7 @@ import fc from "fast-check";
 import type { Client } from "pg";
 import { describe, it } from "vitest";
 import {
+  existingContent,
   insertScenario,
   pick,
   resolveViewer,
@@ -558,6 +559,8 @@ describe("visibility properties", () => {
               );
               extraIds.push(item.rows[0]!.id);
             }
+            // Each extra status replaced its business's generated status and anything nested under it.
+            fixture.content = await existingContent(client, fixture.content);
             const items = circleItems(fixture, extraIds);
             if (items.length === 0) return;
             const user = simulatedUser(fixture, viewerSpec);

@@ -11,6 +11,7 @@ import fc from "fast-check";
 import type { Client } from "pg";
 import { describe, it } from "vitest";
 import {
+  existingContent,
   insertScenario,
   pick,
   scenarioArb,
@@ -184,6 +185,8 @@ describe("circle access properties", () => {
                 [item.rows[0]!.id, circle.rows[0]!.id],
               );
               followItemIds.push(item.rows[0]!.id);
+              // The new status replaced the business's generated status and anything nested under it.
+              fixture.content = await existingContent(client, fixture.content);
               expectAnswers(
                 await canViewAs(client, requester, followItemIds),
                 followItemIds,
