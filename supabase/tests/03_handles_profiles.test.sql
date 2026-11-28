@@ -16,7 +16,7 @@ insert into auth.users (id, email) values
   ('33333333-3333-4333-8333-333333333333', 'chris.test@example.invalid');
 insert into public.profiles (id, type, owner_user_id, handle, display_name) values
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'person', '11111111-1111-4111-8111-111111111111', 'amina_k', 'Amina'),
-  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'person', '22222222-2222-4222-8222-222222222222', 'brian', 'Brian');
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'person', '22222222-2222-4222-8222-222222222222', 'brian_t', 'Brian');
 
 -- ---------------------------------------------------------------------------------------------
 -- Handle format (Req 4.3) and handles never rewritten (D-6).
@@ -43,14 +43,14 @@ select throws_ok($$ insert into public.profiles (type, handle, display_name) val
   '23514', null, 'a handle with a dash is rejected');
 select throws_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'with space', 'T') $$,
   '23514', null, 'a handle with a space is rejected');
-select throws_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'Amina', 'T') $$,
-  '23514', null, 'a handle with capitals (Amina) is rejected');
-select ok(not exists (select 1 from public.profiles where handle = 'amina'),
-  'Amina was not lowercased into amina');
-select lives_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'amina', 'T') $$,
-  'the lowercase handle amina is accepted');
-select is((select count(*)::int from public.profiles where lower(handle) = 'amina' and handle = 'amina'), 1,
-  'the stored handle amina equals its input');
+select throws_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'Amina_X', 'T') $$,
+  '23514', null, 'a handle with capitals (Amina_X) is rejected');
+select ok(not exists (select 1 from public.profiles where handle = 'amina_x'),
+  'Amina_X was not lowercased into amina_x');
+select lives_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'amina_x', 'T') $$,
+  'the lowercase handle amina_x is accepted');
+select is((select count(*)::int from public.profiles where lower(handle) = 'amina_x' and handle = 'amina_x'), 1,
+  'the stored handle amina_x equals its input');
 
 -- ---------------------------------------------------------------------------------------------
 -- Reserved words (Req 4.4, 4.5), compared as given (D-6).
@@ -68,7 +68,7 @@ select throws_ok($$ insert into public.profiles (type, handle, display_name) val
 -- ---------------------------------------------------------------------------------------------
 -- Case insensitive uniqueness (Req 4.2).
 -- ---------------------------------------------------------------------------------------------
-select throws_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'brian', 'T') $$,
+select throws_ok($$ insert into public.profiles (type, handle, display_name) values ('business', 'brian_t', 'T') $$,
   '23505', null, 'a duplicate handle is rejected');
 select ok((select indisunique from pg_catalog.pg_index where indexrelid = 'public.profiles_handle_uq'::regclass),
   'profiles_handle_uq is unique');

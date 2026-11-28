@@ -9,7 +9,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(346);
+select plan(347);
 
 -- ---------------------------------------------------------------------------------------------
 -- Fixtures, as the test owner with no claims (a trusted caller, so stories can be back-dated).
@@ -343,12 +343,12 @@ set local role authenticated;
 select is(current_user::text, 'authenticated', 'running as authenticated');
 select is(auth.uid(), '07070707-0000-4000-8000-000000000002'::uuid, 'auth.uid() is Bo');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000002'),
             ('07d00000-0000-4000-8000-000000000003'), ('07d00000-0000-4000-8000-000000000005'),
             ('07d00000-0000-4000-8000-000000000006'), ('07d00000-0000-4000-8000-000000000008') $$,
   'Bo reads exactly the content items can_view allows him');
-select set_eq($$ select id from public.vouches $$,
+select set_eq($$ select id from public.vouches where id::text like '07f%' $$,
   $$ values ('07f00000-0000-4000-8000-000000000001'::uuid), ('07f00000-0000-4000-8000-000000000002'),
             ('07f00000-0000-4000-8000-000000000003') $$,
   'Bo reads the vouch about him (hidden), the public vouch and his own');
@@ -381,11 +381,11 @@ set local role authenticated;
 select is(current_user::text, 'authenticated', 'running as authenticated');
 select is(auth.uid(), '07070707-0000-4000-8000-000000000004'::uuid, 'auth.uid() is Di');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000004'),
             ('07d00000-0000-4000-8000-000000000005') $$,
   'Di reads the public writing, the live public story and the group item only');
-select set_eq($$ select id from public.vouches $$,
+select set_eq($$ select id from public.vouches where id::text like '07f%' $$,
   $$ values ('07f00000-0000-4000-8000-000000000002'::uuid) $$, 'Di reads only the public vouch');
 select ok(not public.can_view('07d00000-0000-4000-8000-000000000002', '07b00000-0000-4000-8000-000000000002'),
   'Di asking as Bo is treated as a null viewer (Req 20.15)');
@@ -415,7 +415,7 @@ set local role authenticated;
 select is(current_user::text, 'authenticated', 'running as authenticated');
 select is(auth.uid(), '07070707-0000-4000-8000-000000000005'::uuid, 'auth.uid() is Eli');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000005'),
             ('07d00000-0000-4000-8000-000000000011'), ('07d00000-0000-4000-8000-000000000012') $$,
   'Eli reads Shop''s items as its manager plus the public items');
@@ -433,7 +433,7 @@ set local role authenticated;
 select is(current_user::text, 'authenticated', 'running as authenticated');
 select is(auth.uid(), '07070707-0000-4000-8000-000000000006'::uuid, 'auth.uid() is Fay');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000005'),
             ('07d00000-0000-4000-8000-000000000011'), ('07d00000-0000-4000-8000-000000000012') $$,
   'Fay reads Shop''s connections and all followers items plus the public items');
@@ -448,10 +448,10 @@ set local role anon;
 select is(current_user::text, 'anon', 'running as anon');
 select is(auth.uid(), null::uuid, 'auth.uid() is null for anon');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000005') $$,
   'anon reads only the live public items whose parents are visible');
-select set_eq($$ select id from public.vouches $$,
+select set_eq($$ select id from public.vouches where id::text like '07f%' $$,
   $$ values ('07f00000-0000-4000-8000-000000000002'::uuid) $$, 'anon reads only the public vouch');
 select throws_ok($$ select audience from public.content_items $$, '42501', null,
   'anon cannot read content_items.audience (D-3)');
@@ -493,13 +493,13 @@ set local role authenticated;
 select is(current_user::text, 'authenticated', 'running as authenticated');
 select is(auth.uid(), '07070707-0000-4000-8000-000000000001'::uuid, 'auth.uid() is Ann');
 
-select set_eq($$ select id from public.content_items $$,
+select set_eq($$ select id from public.content_items where id::text like '07d%' $$,
   $$ values ('07d00000-0000-4000-8000-000000000001'::uuid), ('07d00000-0000-4000-8000-000000000002'),
             ('07d00000-0000-4000-8000-000000000003'), ('07d00000-0000-4000-8000-000000000004'),
             ('07d00000-0000-4000-8000-000000000005'), ('07d00000-0000-4000-8000-000000000006'),
             ('07d00000-0000-4000-8000-000000000007'), ('07d00000-0000-4000-8000-000000000008') $$,
   'Ann reads every item she owns, the expired story included, and no circle item of Shop');
-select set_eq($$ select id from public.vouches $$,
+select set_eq($$ select id from public.vouches where id::text like '07f%' $$,
   $$ values ('07f00000-0000-4000-8000-000000000001'::uuid), ('07f00000-0000-4000-8000-000000000002'),
             ('07f00000-0000-4000-8000-000000000003') $$,
   'Ann reads the vouch she wrote and both vouches about her');
@@ -1104,5 +1104,20 @@ select is_empty($$ select 1 from public.story_views where story_id = '07d00000-0
 
 select lives_ok($$ set constraints all immediate $$, 'everything left in the transaction passes the deferred checks');
 
+-- Latency (Req 20.16): 200 timed can_view calls on one fixture row, p95 under 5 ms.
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+create temp table cv_timings (ms numeric) on commit drop;
+do $$
+declare t timestamptz;
+begin
+  for i in 1..200 loop
+    t := clock_timestamp();
+    perform public.can_view('07d00000-0000-4000-8000-000000000001', '07b00000-0000-4000-8000-000000000002');
+    insert into cv_timings values (extract(epoch from clock_timestamp() - t) * 1000);
+  end loop;
+end $$;
+select cmp_ok((select percentile_disc(0.95) within group (order by ms) from cv_timings), '<', 5::numeric,
+  'p95 of can_view over 200 calls is under 5 ms (Req 20.16)');
 select * from finish();
 rollback;

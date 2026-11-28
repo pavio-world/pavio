@@ -7,7 +7,7 @@ begin;
 -- Same login workaround as 01_schema.test.sql: run as postgres with extensions on the path.
 set local role postgres;
 set local search_path = public, extensions;
-select plan(112);
+select plan(113);
 
 -- =============================================================================================
 -- Catalog: tables, policies, grants and function settings (Req 16.9, 22.1 to 22.3, 24.5, 24.9)
@@ -390,5 +390,20 @@ select throws_ok($$ select private.record_search_appearances(array['14b00000-000
 set local role postgres;
 select set_config('request.jwt.claims', '', true);
 
+-- Latency (Req 24.12): 50 timed search_directory calls, p95 under 200 ms.
+set local role postgres;
+select set_config('request.jwt.claims', '', true);
+create temp table sd_timings (ms numeric) on commit drop;
+do $$
+declare t timestamptz;
+begin
+  for i in 1..50 loop
+    t := clock_timestamp();
+    perform count(*) from public.search_directory('nutritonist');
+    insert into sd_timings values (extract(epoch from clock_timestamp() - t) * 1000);
+  end loop;
+end $$;
+select cmp_ok((select percentile_disc(0.95) within group (order by ms) from sd_timings), '<', 200::numeric,
+  'p95 of search_directory over 50 calls is under 200 ms (Req 24.12)');
 select * from finish();
 rollback;
