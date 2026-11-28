@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "test:property": "vitest run tests/property",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx supabase/seed/seed.ts",
+    "seed:verify": "tsx supabase/seed/verify.ts"
   },
   "devDependencies": {
     "@supabase/supabase-js": "^2.119.2",
