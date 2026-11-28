@@ -32,16 +32,29 @@ export async function withRolledBackTx<T>(
   fn: (client: Client) => Promise<T>,
 ): Promise<T> {
   const client = new Client({ connectionString: connectionString() });
+  // Without a listener, a connection error while the client is idle is an
+  // unhandled event and crashes the worker. An error during the test is kept
+  // and fails that test; one after the test has finished is ignored.
+  let finished = false;
+  let connectionError: Error | undefined;
+  client.on("error", (err: Error) => {
+    if (!finished) connectionError ??= err;
+  });
   await client.connect();
   try {
     await client.query("begin");
     try {
-      return await fn(client);
+      const result = await fn(client);
+      if (connectionError !== undefined) throw connectionError;
+      return result;
     } finally {
-      await client.query("rollback");
+      await client.query("rollback").catch((err: unknown) => {
+        if (connectionError === undefined) throw err;
+      });
     }
   } finally {
-    await client.end();
+    finished = true;
+    await client.end().catch(() => undefined);
   }
 }
 
